@@ -5,24 +5,32 @@ export interface Env {
   ADMIN_KEY: string;
 }
 
+const PRICES_URL = "https://raw.githubusercontent.com/joestar9/jojo/refs/heads/main/prices.json";
+
 const KEY_RATES = "rates:latest";
+const KEY_ETAG = "rates:etag";
 const KEY_HASH = "rates:hash";
 
-const BONBAST_URLS = ["https://bonbast.com/json", "https://www.bonbast.com/json"];
+type Rate = { sell: number; buy: number; unit: number; title?: string };
+type Stored = { fetchedAtMs: number; source: string; rates: Record<string, Rate> };
 
-const CURRENCY_ALIASES: Array<{ keys: string[]; code: string; title: string; unit?: number }> = [
+const ALIASES: Array<{ keys: string[]; code: string; title: string }> = [
   { keys: ["دلار", "دلارامریکا", "دلارآمریکا", "usd"], code: "usd", title: "دلار آمریکا 🇺🇸" },
   { keys: ["یورو", "eur"], code: "eur", title: "یورو 🇪🇺" },
-  { keys: ["پوند", "پوندانگلیس", "پوندانگلیسی", "gbp"], code: "gbp", title: "پوند انگلیس 🇬🇧" },
+  { keys: ["پوند", "پوندانگلیس", "gbp"], code: "gbp", title: "پوند انگلیس 🇬🇧" },
   { keys: ["درهم", "درهمامارات", "aed"], code: "aed", title: "درهم امارات 🇦🇪" },
   { keys: ["لیر", "لیرترکیه", "try"], code: "try", title: "لیر ترکیه 🇹🇷" },
-  { keys: ["ین", "ینژاپن", "jpy"], code: "jpy", title: "ین ژاپن 🇯🇵", unit: 10 },
-  { keys: ["درام", "درامارمنستان", "amd"], code: "amd", title: "درام ارمنستان 🇦🇲", unit: 10 },
-  { keys: ["دینارعراق", "iqd", "دینار عراق"], code: "iqd", title: "دینار عراق 🇮🇶", unit: 100 },
-  { keys: ["روبل", "rub"], code: "rub", title: "روبل روسیه 🇷🇺" },
-  { keys: ["یوان", "یوآن", "cny"], code: "cny", title: "یوان چین 🇨🇳" },
-  { keys: ["سکهامامی", "سکه امامی", "امامی", "emami"], code: "emami", title: "سکه امامی 🪙" },
-  { keys: ["طلای18", "طلای 18", "طلای۱۸", "۱۸", "gold18"], code: "gol", title: "طلای ۱۸ 🪙" }
+  { keys: ["ین", "ینژاپن", "jpy"], code: "jpy", title: "ین ژاپن 🇯🇵" },
+  { keys: ["درام", "amd"], code: "amd", title: "درام ارمنستان 🇦🇲" },
+  { keys: ["دینار", "دینارعراق", "iqd"], code: "iqd", title: "دینار عراق 🇮🇶" },
+
+  { keys: ["سکه امامی", "امامی", "emami"], code: "emami", title: "سکه امامی 🪙" },
+  { keys: ["بهار آزادی", "آزادی", "azadi"], code: "azadi", title: "سکه بهار آزادی 🪙" },
+  { keys: ["نیم سکه", "نیم", "half"], code: "half", title: "نیم سکه 🪙" },
+  { keys: ["ربع سکه", "ربع", "quarter"], code: "quarter", title: "ربع سکه 🪙" },
+  { keys: ["گرمی", "gerami"], code: "gerami", title: "سکه گرمی 🪙" },
+
+  { keys: ["طلا 18", "طلای 18", "طلای۱۸", "gold18", "۱۸"], code: "gold18", title: "طلای ۱۸ 🥇" }
 ];
 
 function normalizeDigits(input: string) {
@@ -33,7 +41,7 @@ function normalizeDigits(input: string) {
   return input.split("").map(ch => map[ch] ?? ch).join("");
 }
 
-function normalizeText(input: string) {
+function norm(input: string) {
   return normalizeDigits(input)
     .replace(/\u200c/g, " ")
     .replace(/[ي]/g, "ی")
@@ -58,64 +66,102 @@ async function sha256Hex(s: string) {
   return Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
-async function fetchBonbastJSON(): Promise<any> {
-  let lastErr: any = null;
-  for (const url of BONBAST_URLS) {
-    try {
-      const res = await fetch(url, {
-        headers: {
-          "accept": "application/json",
-          "user-agent": "Mozilla/5.0",
-          "referer": "https://bonbast.com/"
-        }
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return await res.json();
-    } catch (e) {
-      lastErr = e;
-    }
+function toNum(v: any): number | null {
+  if (v == null) return null;
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  const s = String(v).replace(/,/g, "").trim();
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+
+function normalizeRatesJson(j: any): Stored {
+  const now = Date.now();
+  const fetchedAtMs = toNum(j?.fetchedAtMs) ?? toNum(j?.updatedAtMs) ?? now;
+
+  const rootRates = j?.rates && typeof j.rates === "object" ? j.rates : j;
+  const rates: Record<string, Rate> = {};
+
+  if (!rootRates || typeof rootRates !== "object") {
+    return { fetchedAtMs, source: "github", rates: {} };
   }
-  throw lastErr ?? new Error("fetch failed");
+
+  for (const [kRaw, v] of Object.entries(rootRates)) {
+    const k = String(kRaw).toLowerCase().trim();
+    if (!k) continue;
+
+    const sell = toNum((v as any)?.sell) ?? toNum((v as any)?.s) ?? toNum((v as any)?.price);
+    const buy = toNum((v as any)?.buy) ?? toNum((v as any)?.b) ?? sell;
+    const unit = toNum((v as any)?.unit) ?? 1;
+    const title = typeof (v as any)?.title === "string" ? (v as any).title : undefined;
+
+    if (sell == null || buy == null || sell <= 0 || buy <= 0) continue;
+
+    rates[k] = { sell, buy, unit: unit > 0 ? unit : 1, title };
+  }
+
+  return { fetchedAtMs, source: "github", rates };
+}
+
+async function fetchPricesFromGithub(env: Env): Promise<{ stored: Stored; etag?: string; changed: boolean }> {
+  const etag = await env.BOT_KV.get(KEY_ETAG);
+
+  const headers: Record<string, string> = { "accept": "application/json" };
+  if (etag) headers["if-none-match"] = etag;
+
+  const res = await fetch(PRICES_URL, {
+    method: "GET",
+    headers,
+    cf: { cacheTtl: 0, cacheEverything: false }
+  });
+
+  if (res.status === 304) {
+    const txt = await env.BOT_KV.get(KEY_RATES);
+    if (txt) return { stored: JSON.parse(txt) as Stored, etag, changed: false };
+  }
+
+  if (!res.ok) {
+    const t = await res.text().catch(() => "");
+    throw new Error(`GitHub HTTP ${res.status} ${t.slice(0, 200)}`);
+  }
+
+  const newEtag = res.headers.get("etag") || undefined;
+  const json = await res.json();
+  const stored = normalizeRatesJson(json);
+  return { stored, etag: newEtag, changed: true };
 }
 
 async function refreshRates(env: Env) {
-  const data = await fetchBonbastJSON();
-  const payload = { fetchedAtMs: Date.now(), source: "bonbast", data };
-  const canon = JSON.stringify(data);
+  const { stored, etag, changed } = await fetchPricesFromGithub(env);
+
+  const canon = JSON.stringify(stored.rates);
   const h = await sha256Hex(canon);
-
   const prevHash = await env.BOT_KV.get(KEY_HASH);
-  const changed = prevHash !== h;
+  const reallyChanged = prevHash !== h;
 
-  if (changed) {
+  if (reallyChanged) {
     await env.BOT_KV.put(KEY_HASH, h);
-    await env.BOT_KV.put(KEY_RATES, JSON.stringify(payload));
-  } else {
-    const prev = await env.BOT_KV.get(KEY_RATES);
-    if (!prev) {
-      await env.BOT_KV.put(KEY_RATES, JSON.stringify(payload));
-    }
+    await env.BOT_KV.put(KEY_RATES, JSON.stringify(stored));
+    if (etag) await env.BOT_KV.put(KEY_ETAG, etag);
+    return { ok: true, changed: true, fetchedAtMs: stored.fetchedAtMs, count: Object.keys(stored.rates).length };
   }
 
-  return { ok: true, changed, fetchedAtMs: payload.fetchedAtMs };
+  const prev = await env.BOT_KV.get(KEY_RATES);
+  if (!prev) await env.BOT_KV.put(KEY_RATES, JSON.stringify(stored));
+  if (etag) await env.BOT_KV.put(KEY_ETAG, etag);
+
+  return { ok: true, changed: false, fetchedAtMs: stored.fetchedAtMs, count: Object.keys(stored.rates).length, note: changed ? "content_same" : "not_modified" };
 }
 
-function parsePersianWordNumberUpTo100(tokens: string[]): number | null {
-  const ones: Record<string, number> = {
-    "یک":1,"یه":1,"دو":2,"سه":3,"چهار":4,"پنج":5,"شش":6,"شیش":6,"هفت":7,"هشت":8,"نه":9
-  };
-  const teens: Record<string, number> = {
-    "ده":10,"یازده":11,"دوازده":12,"سیزده":13,"چهارده":14,"پانزده":15,"شانزده":16,"هفده":17,"هجده":18,"نوزده":19
-  };
-  const tens: Record<string, number> = {
-    "بیست":20,"سی":30,"چهل":40,"پنجاه":50,"شصت":60,"هفتاد":70,"هشتاد":80,"نود":90
-  };
+function parsePersianNumberUpTo100(tokens: string[]): number | null {
+  const ones: Record<string, number> = { "یک":1,"یه":1,"دو":2,"سه":3,"چهار":4,"پنج":5,"شش":6,"شیش":6,"هفت":7,"هشت":8,"نه":9 };
+  const teens: Record<string, number> = { "ده":10,"یازده":11,"دوازده":12,"سیزده":13,"چهارده":14,"پانزده":15,"شانزده":16,"هفده":17,"هجده":18,"نوزده":19 };
+  const tens: Record<string, number> = { "بیست":20,"سی":30,"چهل":40,"پنجاه":50,"شصت":60,"هفتاد":70,"هشتاد":80,"نود":90 };
 
   const t = tokens.filter(x => x && x !== "و");
   if (t.length === 0) return null;
 
-  if (t.join("") === "یکصد" || t.join(" ") === "یک صد") return 100;
-  if (t.length === 1 && (t[0] === "صد")) return 100;
+  const joined = t.join("").replace(/\s+/g, "");
+  if (joined === "یکصد" || t.join(" ") === "یک صد" || t[0] === "صد") return 100;
 
   if (t.length === 1) {
     if (teens[t[0]] != null) return teens[t[0]];
@@ -124,55 +170,39 @@ function parsePersianWordNumberUpTo100(tokens: string[]): number | null {
   }
 
   if (t.length === 2) {
-    if (tens[t[0]] != null && ones[t[1]] != null) return tens[t[0]] + ones[t[1]];
-    if (teens[t[0]] != null && ones[t[1]] == null) return teens[t[0]];
+    const a = t[0], b = t[1];
+    if (tens[a] != null && ones[b] != null) return tens[a] + ones[b];
   }
 
-  if (t.length === 3) {
-    const a = t[0], b = t[1], c = t[2];
-    if (tens[a] != null && b === "و" && ones[c] != null) return tens[a] + ones[c];
-    if (tens[a] != null && ones[b] != null && c === "") return tens[a] + ones[b];
+  let total = 0;
+  for (const w of t) {
+    if (teens[w] != null) return teens[w];
+    if (tens[w] != null) total += tens[w];
+    else if (ones[w] != null) total += ones[w];
+    else return null;
   }
-
-  if (t.length === 4) {
-    const a = t[0], b = t[1], c = t[2], d = t[3];
-    if (tens[a] != null && b === "و" && ones[c] != null && d === "") return tens[a] + ones[c];
-  }
-
-  if (t.length <= 4) {
-    let total = 0;
-    for (const w of t) {
-      if (teens[w] != null) return teens[w];
-      if (tens[w] != null) total += tens[w];
-      else if (ones[w] != null) total += ones[w];
-      else if (w === "صد") total += 100;
-      else return null;
-    }
-    if (total >= 1 && total <= 100) return total;
-  }
-
+  if (total >= 1 && total <= 100) return total;
   return null;
 }
 
 function findCurrency(textNorm: string) {
   const cleaned = stripPunct(textNorm).replace(/\s+/g, " ").trim();
-
-  const allKeys = CURRENCY_ALIASES
-    .flatMap(c => c.keys.map(k => ({ k: normalizeText(k).replace(/\s+/g, ""), c })))
-    .sort((a, b) => b.k.length - a.k.length);
-
   const compact = cleaned.replace(/\s+/g, "");
-  for (const item of allKeys) {
-    if (compact.includes(item.k)) return item.c;
+
+  const keys = ALIASES.flatMap(a => a.keys.map(k => ({ k: norm(k).replace(/\s+/g, ""), a })))
+    .sort((x, y) => y.k.length - x.k.length);
+
+  for (const it of keys) {
+    if (compact.includes(it.k)) return it.a;
   }
 
-  const m = cleaned.match(/\b([a-z]{3})\b/i);
+  const m = cleaned.match(/\b([a-z]{3,10})\b/i);
   if (m) return { keys: [m[1].toLowerCase()], code: m[1].toLowerCase(), title: m[1].toUpperCase() };
 
   return null;
 }
 
-function extractAmount(textNorm: string, currencyKeys: string[]): number {
+function extractAmount(textNorm: string, currencyKeys: string[]) {
   const cleaned = stripPunct(textNorm).replace(/\s+/g, " ").trim();
 
   const numMatch = cleaned.match(/(\d+(?:\.\d+)?)/);
@@ -182,72 +212,47 @@ function extractAmount(textNorm: string, currencyKeys: string[]): number {
   }
 
   const tokens = cleaned.split(" ").filter(Boolean);
-
-  const keyTokens = currencyKeys
-    .map(k => normalizeText(k))
-    .map(k => stripPunct(k).replace(/\s+/g, " ").trim())
-    .filter(Boolean);
+  const keyNorms = currencyKeys.map(k => stripPunct(norm(k))).filter(Boolean);
 
   let idx = -1;
   for (let i = 0; i < tokens.length; i++) {
-    const tokenCompact = tokens[i].replace(/\s+/g, "");
-    for (const kk of keyTokens) {
-      const kkCompact = kk.replace(/\s+/g, "");
-      if (tokenCompact.includes(kkCompact)) {
-        idx = i;
-        break;
-      }
+    const tok = tokens[i].replace(/\s+/g, "");
+    for (const kk of keyNorms) {
+      const kkc = kk.replace(/\s+/g, "");
+      if (tok.includes(kkc)) { idx = i; break; }
     }
     if (idx !== -1) break;
   }
 
-  const lookback = idx === -1 ? tokens.slice(0, 5) : tokens.slice(Math.max(0, idx - 4), idx);
-  const n = parsePersianWordNumberUpTo100(lookback);
-  if (n && n > 0) return n;
+  const left = idx === -1 ? tokens : tokens.slice(Math.max(0, idx - 7), idx);
+  const win = left.slice(-7);
+
+  for (let i = 0; i < win.length; i++) {
+    for (let j = win.length; j > i; j--) {
+      const n = parsePersianNumberUpTo100(win.slice(i, j));
+      if (n != null && n > 0) return n;
+    }
+  }
 
   return 1;
 }
 
-function readSellBuyFromData(data: any, code: string) {
-  if (!data || typeof data !== "object") return null;
-
-  const c = code.toLowerCase();
-
-  if (c === "emami") {
-    const sell = Number(String(data["emami1"] ?? "").replace(/,/g, ""));
-    const buy = Number(String(data["emami12"] ?? "").replace(/,/g, ""));
-    if (Number.isFinite(sell) && sell > 0 && Number.isFinite(buy) && buy > 0) return { sell, buy };
-    return null;
-  }
-
-  if (c === "gol") {
-    const v = Number(String(data["gol18"] ?? "").replace(/,/g, ""));
-    if (Number.isFinite(v) && v > 0) return { sell: v, buy: v };
-    return null;
-  }
-
-  const sell = Number(String(data[`${c}1`] ?? "").replace(/,/g, ""));
-  const buy = Number(String(data[`${c}2`] ?? "").replace(/,/g, ""));
-  if (!Number.isFinite(sell) || !Number.isFinite(buy) || sell <= 0 || buy <= 0) return null;
-  return { sell, buy };
+function normalizeCommand(textNorm: string) {
+  const t = stripPunct(textNorm).trim();
+  const first = t.split(/\s+/)[0] || "";
+  return first.split("@")[0];
 }
 
-function prettyResponse(opts: {
-  title: string;
-  amount: number;
-  unitNote?: string;
-  sell: number;
-  buy: number;
-  fetchedAtMs: number;
-}) {
-  const { title, amount, unitNote, sell, buy, fetchedAtMs } = opts;
+function pretty(opts: { title: string; amount: number; sell: number; buy: number; fetchedAtMs: number; unit: number }) {
+  const { title, amount, sell, buy, fetchedAtMs, unit } = opts;
   const sellTotal = sell * amount;
   const buyTotal = buy * amount;
 
   const lines: string[] = [];
   lines.push(`✨ <b>${title}</b>`);
   lines.push("");
-  lines.push(`📌 مقدار: <b>${amount}</b>${unitNote ? ` <i>(${unitNote})</i>` : ""}`);
+  lines.push(`📌 مقدار: <b>${amount}</b>`);
+  if (unit > 1) lines.push(`ℹ️ واحد قیمت در فایل: <b>${unit}</b>`);
   lines.push(`🟢 فروش: <b>${formatToman(sell)}</b> تومان`);
   lines.push(`🔵 خرید: <b>${formatToman(buy)}</b> تومان`);
   if (amount !== 1) {
@@ -264,12 +269,11 @@ function helpText() {
   return [
     "🤖 <b>راهنما</b>",
     "",
-    "نمونه‌ها:",
+    "مثال‌ها:",
     "• امروز دلار چنده؟",
     "• 2 دلار",
     "• بیست دلار",
     "• امروز 20 دلار فاکتور پرداخت کردم",
-    "• eur",
     "",
     "دستورها:",
     "• /all",
@@ -277,74 +281,51 @@ function helpText() {
   ].join("\n");
 }
 
-function buildAllText(stored: { fetchedAtMs: number; data: any }) {
-  const data = stored.data || {};
-  const keys = Object.keys(data);
-  const bases = new Set<string>();
-  for (const k of keys) {
-    const m = k.match(/^([a-z]{3})([12])$/i);
-    if (m) {
-      const base = m[1].toLowerCase();
-      if (data[`${base}1`] != null && data[`${base}2`] != null) bases.add(base);
-    }
-  }
-  const list = Array.from(bases).sort();
-
+function buildAll(stored: Stored) {
+  const codes = Object.keys(stored.rates).sort();
   const lines: string[] = [];
-  lines.push(`📊 <b>لیست ارزها (Sell/Buy)</b>`);
+  lines.push(`📊 <b>لیست نرخ‌ها</b>`);
   lines.push(`⏱ <code>${new Date(stored.fetchedAtMs).toLocaleString("fa-IR")}</code>`);
   lines.push("");
-
-  const max = 120;
-  for (const c of list.slice(0, max)) {
-    const sb = readSellBuyFromData(data, c);
-    if (!sb) continue;
-    lines.push(`• <b>${c.toUpperCase()}</b>  ${formatToman(sb.sell)} / ${formatToman(sb.buy)}`);
+  for (const c of codes.slice(0, 180)) {
+    const r = stored.rates[c];
+    const unit = r.unit || 1;
+    const unitNote = unit > 1 ? ` (×${unit})` : "";
+    lines.push(`• <b>${c.toUpperCase()}</b>${unitNote}  ${formatToman(r.sell / unit)} / ${formatToman(r.buy / unit)}`);
   }
-
-  if (list.length > max) lines.push(`\n… و ${list.length - max} مورد دیگر (اگر خواستی paging اضافه می‌کنم).`);
+  if (codes.length > 180) lines.push(`\n… و ${codes.length - 180} مورد دیگر`);
   return lines.join("\n");
 }
 
 async function tgSend(env: Env, chatId: number, text: string, replyTo?: number) {
   const url = `https://api.telegram.org/bot${env.TG_TOKEN}/sendMessage`;
-  const body: any = {
-    chat_id: chatId,
-    text,
-    parse_mode: "HTML",
-    disable_web_page_preview: true
-  };
-  if (replyTo) {
-    body.reply_to_message_id = replyTo;
-    body.allow_sending_without_reply = true;
-  }
-  await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body)
-  }).catch(() => {});
+  const body: any = { chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true };
+  if (replyTo) { body.reply_to_message_id = replyTo; body.allow_sending_without_reply = true; }
+  await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(() => {});
 }
 
 function chunkText(s: string, maxLen = 3500) {
-  const chunks: string[] = [];
-  let i = 0;
-  while (i < s.length) {
-    chunks.push(s.slice(i, i + maxLen));
-    i += maxLen;
-  }
-  return chunks;
+  const out: string[] = [];
+  for (let i = 0; i < s.length; i += maxLen) out.push(s.slice(i, i + maxLen));
+  return out;
 }
 
-function normalizeCommand(textNorm: string) {
-  const t = stripPunct(textNorm).trim();
-  const first = t.split(/\s+/)[0] || "";
-  const cmd = first.split("@")[0];
-  return cmd;
+async function getStoredOrRefresh(env: Env, ctx: ExecutionContext): Promise<Stored> {
+  const txt = await env.BOT_KV.get(KEY_RATES);
+  if (txt) {
+    const stored = JSON.parse(txt) as Stored;
+    if (Date.now() - stored.fetchedAtMs > 35 * 60_000) ctx.waitUntil(refreshRates(env).catch(() => {}));
+    return stored;
+  }
+  await refreshRates(env);
+  const txt2 = await env.BOT_KV.get(KEY_RATES);
+  if (!txt2) throw new Error("no data");
+  return JSON.parse(txt2) as Stored;
 }
 
 export default {
   async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext) {
-    await refreshRates(env);
+    await refreshRates(env).catch(() => {});
   },
 
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -355,13 +336,15 @@ export default {
     if (url.pathname === "/refresh") {
       const key = url.searchParams.get("key") || "";
       if (!env.ADMIN_KEY || key !== env.ADMIN_KEY) return new Response("Unauthorized", { status: 401 });
-      const r = await refreshRates(env);
-      return new Response(JSON.stringify(r), { headers: { "content-type": "application/json" } });
+      try {
+        const r = await refreshRates(env);
+        return new Response(JSON.stringify(r), { headers: { "content-type": "application/json" } });
+      } catch (e: any) {
+        return new Response(JSON.stringify({ ok: false, error: String(e?.message ?? e) }), { headers: { "content-type": "application/json" }, status: 502 });
+      }
     }
 
-    if (url.pathname !== "/telegram" || req.method !== "POST") {
-      return new Response("Not Found", { status: 404 });
-    }
+    if (url.pathname !== "/telegram" || req.method !== "POST") return new Response("Not Found", { status: 404 });
 
     const got = req.headers.get("X-Telegram-Bot-Api-Secret-Token") || "";
     if (got !== env.TG_SECRET) return new Response("Unauthorized", { status: 401 });
@@ -374,11 +357,11 @@ export default {
 
     if (!chatId || !text) return new Response("ok");
 
-    const textNorm = normalizeText(text);
+    const textNorm = norm(text);
     const cmd = normalizeCommand(textNorm);
 
-    const doReply = msg?.chat?.type === "group" || msg?.chat?.type === "supergroup";
-    const replyTo = doReply ? messageId : undefined;
+    const isGroup = msg?.chat?.type === "group" || msg?.chat?.type === "supergroup";
+    const replyTo = isGroup ? messageId : undefined;
 
     const run = async () => {
       if (cmd === "/start" || cmd === "/help") {
@@ -389,80 +372,35 @@ export default {
       if (cmd === "/refresh") {
         const parts = stripPunct(textNorm).split(/\s+/).filter(Boolean);
         const key = parts[1] || "";
-        if (!env.ADMIN_KEY || key !== env.ADMIN_KEY) {
-          await tgSend(env, chatId, "⛔️ کلید اشتباهه.", replyTo);
-          return;
-        }
+        if (!env.ADMIN_KEY || key !== env.ADMIN_KEY) { await tgSend(env, chatId, "⛔️ کلید اشتباهه.", replyTo); return; }
         const r = await refreshRates(env);
-        await tgSend(
-          env,
-          chatId,
-          r.changed
-            ? `✅ بروزرسانی انجام شد.\n⏱ <code>${new Date(r.fetchedAtMs).toLocaleString("fa-IR")}</code>`
-            : `ℹ️ تغییری نداشت.\n⏱ <code>${new Date(r.fetchedAtMs).toLocaleString("fa-IR")}</code>`,
-          replyTo
-        );
+        await tgSend(env, chatId, `✅ بروزرسانی شد.\n🧾 count: <b>${r.count}</b>\n⏱ <code>${new Date(r.fetchedAtMs).toLocaleString("fa-IR")}</code>`, replyTo);
         return;
       }
+
+      const stored = await getStoredOrRefresh(env, ctx);
 
       if (cmd === "/all") {
-        let storedTxt = await env.BOT_KV.get(KEY_RATES);
-        if (!storedTxt) {
-          await refreshRates(env);
-          storedTxt = await env.BOT_KV.get(KEY_RATES);
-        }
-        if (!storedTxt) {
-          await tgSend(env, chatId, "⛔️ هنوز دیتا آماده نیست. چند لحظه بعد دوباره بزن.", replyTo);
-          return;
-        }
-        const stored = JSON.parse(storedTxt);
-        const out = buildAllText({ fetchedAtMs: Number(stored.fetchedAtMs || 0), data: stored.data });
-        const chunks = chunkText(out);
-        for (const c of chunks) await tgSend(env, chatId, c, replyTo);
+        const out = buildAll(stored);
+        for (const c of chunkText(out)) await tgSend(env, chatId, c, replyTo);
         return;
       }
 
-      const currency = findCurrency(textNorm);
-      if (!currency) return;
+      const cur = findCurrency(textNorm);
+      if (!cur) return;
 
-      let storedTxt = await env.BOT_KV.get(KEY_RATES);
-      if (!storedTxt) {
-        await refreshRates(env);
-        storedTxt = await env.BOT_KV.get(KEY_RATES);
-      }
-      if (!storedTxt) {
-        await tgSend(env, chatId, "⛔️ هنوز دیتا آماده نیست. چند لحظه بعد دوباره تلاش کن.", replyTo);
-        return;
-      }
+      const amount = extractAmount(textNorm, cur.keys);
+      const code = cur.code.toLowerCase();
 
-      const stored = JSON.parse(storedTxt);
-      const data = stored.data;
-      const fetchedAtMs = Number(stored.fetchedAtMs || 0);
+      const r = stored.rates[code];
+      if (!r) { await tgSend(env, chatId, `🤷‍♂️ «${cur.title}» تو فایل پیدا نشد.`, replyTo); return; }
 
-      const amount = extractAmount(textNorm, currency.keys);
-      const unit = currency.unit ?? 1;
+      const unit = r.unit || 1;
+      const sell = r.sell / unit;
+      const buy = r.buy / unit;
+      const title = r.title ? `${r.title}` : cur.title;
 
-      const sb = readSellBuyFromData(data, currency.code);
-      if (!sb) {
-        await tgSend(env, chatId, `🤷‍♂️ نرخ «${currency.title}» پیدا نشد.`, replyTo);
-        return;
-      }
-
-      const sellPer1 = sb.sell / unit;
-      const buyPer1 = sb.buy / unit;
-
-      const unitNote = unit !== 1 ? `قیمت برای ${unit} واحد در منبع` : undefined;
-
-      const out = prettyResponse({
-        title: currency.title,
-        amount,
-        unitNote,
-        sell: sellPer1,
-        buy: buyPer1,
-        fetchedAtMs
-      });
-
-      await tgSend(env, chatId, out, replyTo);
+      await tgSend(env, chatId, pretty({ title, amount, sell, buy, fetchedAtMs: stored.fetchedAtMs, unit }), replyTo);
     };
 
     ctx.waitUntil(run());
