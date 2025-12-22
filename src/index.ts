@@ -539,7 +539,27 @@ function buildAll(stored: Stored) {
 const PRICE_PAGE_SIZE = 8;
 
 type PriceCategory = "fiat" | "crypto";
-type PriceListItem = { code: string; text: string; category: PriceCategory };
+type PriceListItem = {
+  code: string;
+  category: PriceCategory;
+  emoji: string;
+  name: string;
+  price: string;
+};
+
+// A small curated map for nicer crypto labels (falls back to CSV name if missing)
+const CRYPTO_META: Record<string, { emoji: string; fa: string }> = {
+  btc: { emoji: "₿", fa: "بیت‌کوین" },
+  eth: { emoji: "⟠", fa: "اتریوم" },
+  usdt: { emoji: "💵", fa: "تتر" },
+  ton: { emoji: "💠", fa: "تون" },
+  trx: { emoji: "🔺", fa: "ترون" },
+  not: { emoji: "⭐️", fa: "نات‌کوین" },
+  doge: { emoji: "🐶", fa: "دوج‌کوین" },
+  shib: { emoji: "🐕", fa: "شیبا" },
+  sol: { emoji: "🌞", fa: "سولانا" },
+  bnb: { emoji: "🟡", fa: "بی‌ان‌بی" }
+};
 
 function getUpdateTimeStr(stored: Stored) {
   // Keep the original time behavior (IR time) used in buildAll()
@@ -556,6 +576,12 @@ function clampPage(page: number, totalPages: number) {
 function shortButtonText(s: string, max = 60) {
   if (s.length <= max) return s;
   return s.slice(0, max - 1) + "…";
+}
+
+function shortColText(s: string, max = 18) {
+  const t = s.replace(/\s+/g, " ").trim();
+  if (t.length <= max) return t;
+  return t.slice(0, max - 1) + "…";
 }
 
 function buildPriceItems(stored: Stored, category: PriceCategory): PriceListItem[] {
@@ -580,11 +606,14 @@ function buildPriceItems(stored: Stored, category: PriceCategory): PriceListItem
       const r = rates[c];
       const per1 = Math.round(r.price / (r.unit || 1));
       const toman = formatToman(per1);
-      const change = r.change24h ?? 0;
-      const changeEmoji = change >= 0 ? "🟢" : "🔴";
-      const changeStr = Math.abs(change).toFixed(1) + "%";
-      const txt = shortButtonText(`💎 ${c.toUpperCase()}: ${toman}ت ${changeEmoji}${changeStr}`);
-      items.push({ code: c, category, text: txt });
+      const meta = CRYPTO_META[c] ?? { emoji: (r.emoji || "💎"), fa: (r.fa || r.title || c.toUpperCase()) };
+      items.push({
+        code: c,
+        category,
+        emoji: meta.emoji,
+        name: shortColText(meta.fa, 20),
+        price: shortColText(`${toman} ت`, 16)
+      });
     }
     return items;
   }
@@ -617,8 +646,13 @@ function buildPriceItems(stored: Stored, category: PriceCategory): PriceListItem
     const per1 = Math.round(r.price / (r.unit || 1));
     const priceStr = formatToman(per1);
     const meta = META[c] ?? { emoji: "💱", fa: (r.title || r.fa || c.toUpperCase()) };
-    const txt = shortButtonText(`${meta.emoji} ${meta.fa}: ${priceStr}ت`);
-    items.push({ code: c, category, text: txt });
+    items.push({
+      code: c,
+      category,
+      emoji: meta.emoji,
+      name: shortColText(meta.fa, 20),
+      price: shortColText(`${priceStr} ت`, 16)
+    });
   }
   return items;
 }
@@ -627,9 +661,24 @@ function buildPricesKeyboard(category: PriceCategory, page: number, totalPages: 
   const start = page * PRICE_PAGE_SIZE;
   const slice = items.slice(start, start + PRICE_PAGE_SIZE);
 
-  const rows = slice.map((it) => {
-    return [{ text: it.text, callback_data: `show:${category}:${it.code}:${page}` }];
-  });
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+
+  // Header row (3 columns)
+  const headerRight = category === "crypto" ? "🪙 نام" : "💱 نام";
+  rows.push([
+    { text: "✨", callback_data: "noop" },
+    { text: "💰 قیمت", callback_data: "noop" },
+    { text: headerRight, callback_data: "noop" }
+  ]);
+
+  for (const it of slice) {
+    const cb = `show:${category}:${it.code}:${page}`;
+    rows.push([
+      { text: it.emoji, callback_data: cb },
+      { text: it.price, callback_data: cb },
+      { text: it.name, callback_data: cb }
+    ]);
+  }
 
   const prevCb = page > 0 ? `page:${category}:${page - 1}` : "noop";
   const nextCb = page + 1 < totalPages ? `page:${category}:${page + 1}` : "noop";
@@ -650,7 +699,7 @@ function buildCategoryHeaderText(category: PriceCategory, page: number, totalPag
       `📄 صفحه ${page + 1}/${totalPages}`,
       `🕐 <b>بروزرسانی:</b> ${timeStr}`,
       "",
-      "👇 قیمت‌ها روی دکمه‌هاست:"
+      "👇 لیست به صورت ۳ ستونه روی دکمه‌هاست (ایموجی | قیمت | نام):"
     ].join("\n");
   }
   return [
@@ -658,7 +707,7 @@ function buildCategoryHeaderText(category: PriceCategory, page: number, totalPag
     `📄 صفحه ${page + 1}/${totalPages}`,
     `🕐 <b>بروزرسانی:</b> ${timeStr}`,
     "",
-    "👇 قیمت‌ها روی دکمه‌هاست:"
+    "👇 لیست به صورت ۳ ستونه روی دکمه‌هاست (ایموجی | قیمت | نام):"
   ].join("\n");
 }
 
@@ -674,8 +723,10 @@ function buildPriceDetailText(stored: Stored, category: PriceCategory, code: str
     const changeEmoji = change >= 0 ? "🟢" : "🔴";
     const changeStr = Math.abs(change).toFixed(2) + "%";
 
+    const meta = CRYPTO_META[code] ?? { emoji: (r.emoji || "💎"), fa: (r.fa || r.title || code.toUpperCase()) };
+
     return [
-      `💎 <b>${r.fa || code.toUpperCase()}</b> (${code.toUpperCase()})`,
+      `${meta.emoji} <b>${meta.fa}</b> (${code.toUpperCase()})`,
       `💶 قیمت: <code>${toman}</code> تومان`,
       `💵 قیمت دلاری: <code>${usdP}</code> $`,
       `📈 تغییر 24ساعته: ${changeEmoji} <b>${changeStr}</b>`,
