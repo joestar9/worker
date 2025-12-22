@@ -445,6 +445,63 @@ function chunkText(s: string, maxLen = 3500) {
   return out;
 }
 
+// Safe chunking for Telegram HTML messages: tries to split on newline boundaries
+// to avoid cutting HTML tags like <b> or <code>.
+function chunkTextByNewline(s: string, maxLen = 3800) {
+  const lines = s.split("\n");
+  const pages: string[] = [];
+  let buf = "";
+
+  const pushBuf = () => {
+    const t = buf.trimEnd();
+    if (t) pages.push(t);
+    buf = "";
+  };
+
+  for (const line of lines) {
+    const candidate = buf ? `${buf}\n${line}` : line;
+    if (candidate.length > maxLen) {
+      if (buf) pushBuf();
+      // If a single line is too large, fall back to hard slicing.
+      if (line.length > maxLen) {
+        const sliced = chunkText(line, maxLen);
+        pages.push(...sliced);
+      } else {
+        buf = line;
+      }
+    } else {
+      buf = candidate;
+    }
+  }
+
+  if (buf) pushBuf();
+  return pages.length ? pages : [s];
+}
+
+function buildAllPages(stored: Stored, maxLen = 3800) {
+  // Use the existing buildAll formatting, but split into safe pages for inline navigation.
+  return chunkTextByNewline(buildAll(stored), maxLen);
+}
+
+function buildPricesPageText(pageText: string, pageIndex: number, totalPages: number) {
+  const pageLabel = `صفحه ${pageIndex + 1} از ${totalPages}`;
+  return `📈 <b>لیست کامل قیمت‌ها</b>\n<i>${pageLabel}</i>\n\n${pageText}`;
+}
+
+function buildPricesKeyboard(pageIndex: number, totalPages: number) {
+  const row: any[] = [];
+  if (pageIndex > 0) row.push({ text: "⬅️ قبلی", callback_data: `prices_page:${pageIndex - 1}` });
+  row.push({ text: "🏠 خانه", callback_data: "start_menu" });
+  if (pageIndex < totalPages - 1) row.push({ text: "بعدی ➡️", callback_data: `prices_page:${pageIndex + 1}` });
+
+  return {
+    inline_keyboard: [
+      row,
+      [{ text: `📄 ${pageIndex + 1}/${totalPages}`, callback_data: "prices_info" }]
+    ]
+  };
+}
+
 async function getStoredOrRefresh(env: Env, ctx: ExecutionContext): Promise<Stored> {
   const txt = await env.BOT_KV.get(KEY_RATES);
   if (txt) {
@@ -637,11 +694,25 @@ export default {
       } else if (data === "get_all_prices") {
         await tgAnswerCallback(env, cb.id, "در حال دریافت لیست...");
         const stored = await getStoredOrRefresh(env, ctx);
-        const fullText = buildAll(stored);
-        const chunks = chunkText(fullText, 3800); 
-        for (const chunk of chunks) {
-            await tgSend(env, chatId, chunk);
-        }
+        const pages = buildAllPages(stored, 3800);
+        const pageIndex = 0;
+        const pageText = buildPricesPageText(pages[pageIndex] || "", pageIndex, pages.length);
+        await tgEditMessage(env, chatId, messageId, pageText, buildPricesKeyboard(pageIndex, pages.length));
+        return new Response("ok");
+      } else if (typeof data === "string" && data.startsWith("prices_page:")) {
+        await tgAnswerCallback(env, cb.id);
+        const nStr = data.split(":")[1] || "0";
+        const requested = Number(nStr);
+        const stored = await getStoredOrRefresh(env, ctx);
+        const pages = buildAllPages(stored, 3800);
+        const max = Math.max(0, pages.length - 1);
+        const pageIndex = Number.isFinite(requested) ? Math.min(Math.max(0, requested), max) : 0;
+        const pageText = buildPricesPageText(pages[pageIndex] || "", pageIndex, pages.length);
+        await tgEditMessage(env, chatId, messageId, pageText, buildPricesKeyboard(pageIndex, pages.length));
+        return new Response("ok");
+      } else if (data === "prices_info") {
+        // Just close the spinner / show a tiny hint.
+        await tgAnswerCallback(env, cb.id, "برای دیدن بقیه صفحات از دکمه‌های قبلی/بعدی استفاده کن.");
         return new Response("ok");
       }
       
