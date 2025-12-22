@@ -422,7 +422,6 @@ async function handleCobalt(env: Env, chatId: number, text: string, replyTo?: nu
         return true;
       }
       
-      // Fallback: Retry with ABSOLUTELY MINIMAL payload if custom failed
       if (Object.keys(basePayload).length > 1) {
           const minimalRes = await fetch(endpoint, {
              method: "POST",
