@@ -7,8 +7,7 @@ export interface Env {
 
 const BOT_USERNAME = "worker093578bot";
 
-const PRICES_JSON_URL = "https://raw.githubusercontent.com/joestar9/price-scraper/refs/heads/main/prices.json";
-const CRYPTO_CSV_URL = "https://raw.githubusercontent.com/michaelvincentsebastian/Automated-Crypto-Market-Insights/refs/heads/main/latest-data/latest_data.csv";
+const PRICES_JSON_URL = "https://raw.githubusercontent.com/joestar9/price-scraper/refs/heads/main/merged_prices.json";
 
 const COBALT_INSTANCES = [
   "https://cobalt-api.meowing.de",
@@ -194,72 +193,183 @@ function parseCSV(text: string) {
 
 async function fetchAndMergeData(env: Env): Promise<{ stored: Stored; rawHash: string }> {
   const headers = { "User-Agent": "Mozilla/5.0" };
-  const [resJson, resCsv] = await Promise.all([
-    fetch(PRICES_JSON_URL, { headers }),
-    fetch(CRYPTO_CSV_URL, { headers })
-  ]);
 
+  const res = await fetch(PRICES_JSON_URL, { headers });
+  if (!res.ok) {
+    throw new Error(`Failed to fetch merged prices: HTTP ${res.status}`);
+  }
+
+  const rawText = await res.text();
+  const rawHash = await sha256Hex(rawText);
+
+  const arr = JSON.parse(rawText) as Array<{ name: string; price: string | number }>;
   const rates: Record<string, Rate> = {};
-  let fetchedAtMs = Date.now();
-  
-  // 1. Process Fiat/Gold JSON
-  if (resJson.ok) {
-    const j = await resJson.json<any>();
-    const items = Array.isArray(j?.items) ? j.items : [];
-    for (const it of items) {
-      const type = String(it?.type ?? "").toLowerCase();
-      const name = String(it?.name ?? "").trim();
-      const price = toNum(it?.price);
-      if (!name || price == null || price <= 0) continue;
+  const fetchedAtMs = Date.now();
 
-      if (type === "currency") {
-        const p = parseCurrencyItem(name);
-        if (!p) continue;
-        const meta = META[p.code] ?? { emoji: "💱", fa: p.code.toUpperCase() };
-        rates[p.code] = { price, unit: p.unit, kind: "currency", title: name, emoji: meta.emoji, fa: meta.fa };
-      } else if (type === "gold") {
-        const nn = name.toLowerCase();
-        const key = nn.includes("mithqal") ? "gold_mithqal" : nn.includes("gram") && nn.includes("18") ? "gold_gram_18k" : nn.includes("gram") ? "gold_gram_18k" : nn.includes("mith") ? "gold_mithqal" : "gold_gram_18k";
-        const meta = META[key] ?? { emoji: "💰", fa: "طلا" };
-        rates[key] = { price, unit: 1, kind: "gold", title: name, emoji: meta.emoji, fa: meta.fa };
+  // Helpers
+  const extractUnitFromName = (name: string) => {
+    const m = name.match(/^\s*(\d+)\s*/);
+    if (!m) return { unit: 1, cleanName: name.trim() };
+    const unit = Math.max(1, parseInt(m[1], 10));
+    return { unit, cleanName: name.replace(/^\s*\d+\s*/g, "").trim() };
+  };
+
+  const parseNumberLoose = (v: string | number): number | null => {
+    if (typeof v === "number") {
+      return Number.isFinite(v) ? v : null;
+    }
+    const s = String(v).trim();
+    if (!s) return null;
+    // Supports "13,941,086" and "4,443.74"
+    const cleaned = s.replace(/,/g, "");
+    const n = Number(cleaned);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  const normalizeKeyFromTitle = (title: string) => {
+    // Keep it consistent with findCode(): stripPunct + remove spaces
+    const cleaned = stripPunct(title.toLowerCase()).replace(/\s+/g, " ").trim();
+    return cleaned.replace(/\s+/g, "");
+  };
+
+  // Map some well-known names to stable internal codes
+  const NAME_TO_CODE: Record<string, { code: string; kind: Rate["kind"]; fa: string; emoji: string }> = {
+    "us dollar": { code: "usd", kind: "currency", fa: "دلار آمریکا", emoji: "🇺🇸" },
+    "euro": { code: "eur", kind: "currency", fa: "یورو", emoji: "🇪🇺" },
+    "british pound": { code: "gbp", kind: "currency", fa: "پوند انگلیس", emoji: "🇬🇧" },
+    "swiss franc": { code: "chf", kind: "currency", fa: "فرانک سوئیس", emoji: "🇨🇭" },
+    "canadian dollar": { code: "cad", kind: "currency", fa: "دلار کانادا", emoji: "🇨🇦" },
+    "australian dollar": { code: "aud", kind: "currency", fa: "دلار استرالیا", emoji: "🇦🇺" },
+    "swedish krona": { code: "sek", kind: "currency", fa: "کرون سوئد", emoji: "🇸🇪" },
+    "norwegian krone": { code: "nok", kind: "currency", fa: "کرون نروژ", emoji: "🇳🇴" },
+    "russian ruble": { code: "rub", kind: "currency", fa: "روبل روسیه", emoji: "🇷🇺" },
+    "thai baht": { code: "thb", kind: "currency", fa: "بات تایلند", emoji: "🇹🇭" },
+    "singapore dollar": { code: "sgd", kind: "currency", fa: "دلار سنگاپور", emoji: "🇸🇬" },
+    "hong kong dollar": { code: "hkd", kind: "currency", fa: "دلار هنگ‌کنگ", emoji: "🇭🇰" },
+    "azerbaijani manat": { code: "azn", kind: "currency", fa: "منات آذربایجان", emoji: "🇦🇿" },
+    "armenian dram": { code: "amd", kind: "currency", fa: "درام ارمنستان", emoji: "🇦🇲" },
+    "danish krone": { code: "dkk", kind: "currency", fa: "کرون دانمارک", emoji: "🇩🇰" },
+    "uae dirham": { code: "aed", kind: "currency", fa: "درهم امارات", emoji: "🇦🇪" },
+    "japanese yen": { code: "jpy", kind: "currency", fa: "ین ژاپن", emoji: "🇯🇵" },
+    "turkish lira": { code: "try", kind: "currency", fa: "لیر ترکیه", emoji: "🇹🇷" },
+    "chinese yuan": { code: "cny", kind: "currency", fa: "یوان چین", emoji: "🇨🇳" },
+    "ksa riyal": { code: "sar", kind: "currency", fa: "ریال عربستان", emoji: "🇸🇦" },
+    "indian rupee": { code: "inr", kind: "currency", fa: "روپیه هند", emoji: "🇮🇳" },
+    "ringgit": { code: "myr", kind: "currency", fa: "رینگیت مالزی", emoji: "🇲🇾" },
+    "afghan afghani": { code: "afn", kind: "currency", fa: "افغانی", emoji: "🇦🇫" },
+    "kuwaiti dinar": { code: "kwd", kind: "currency", fa: "دینار کویت", emoji: "🇰🇼" },
+    "iraqi dinar": { code: "iqd", kind: "currency", fa: "دینار عراق", emoji: "🇮🇶" },
+    "bahraini dinar": { code: "bhd", kind: "currency", fa: "دینار بحرین", emoji: "🇧🇭" },
+    "omani rial": { code: "omr", kind: "currency", fa: "ریال عمان", emoji: "🇴🇲" },
+    "qatari riyal": { code: "qar", kind: "currency", fa: "ریال قطر", emoji: "🇶🇦" },
+
+    "gold gram 18k": { code: "gold_gram_18k", kind: "gold", fa: "گرم طلای ۱۸", emoji: "💰" },
+    "gold mithqal": { code: "gold_mithqal", kind: "gold", fa: "مثقال طلا", emoji: "💰" },
+    "gold ounce": { code: "gold_ounce", kind: "gold", fa: "اونس طلا", emoji: "💰" },
+
+    "azadi": { code: "coin_azadi", kind: "gold", fa: "سکه آزادی", emoji: "🪙" },
+    "emami": { code: "coin_emami", kind: "gold", fa: "سکه امامی", emoji: "🪙" },
+    "½azadi": { code: "coin_half_azadi", kind: "gold", fa: "نیم سکه", emoji: "🪙" },
+    "¼azadi": { code: "coin_quarter_azadi", kind: "gold", fa: "ربع سکه", emoji: "🪙" },
+    "gerami": { code: "coin_gerami", kind: "gold", fa: "سکه گرمی", emoji: "🪙" },
+
+    // Crypto (common)
+    "bitcoin": { code: "btc", kind: "crypto", fa: "بیت‌کوین", emoji: "💎" },
+    "ethereum": { code: "eth", kind: "crypto", fa: "اتریوم", emoji: "💎" },
+    "tether usdt": { code: "usdt", kind: "crypto", fa: "تتر", emoji: "💎" },
+    "bnb": { code: "bnb", kind: "crypto", fa: "بی‌ان‌بی", emoji: "💎" },
+    "xrp": { code: "xrp", kind: "crypto", fa: "ریپل", emoji: "💎" },
+    "usdc": { code: "usdc", kind: "crypto", fa: "USDC", emoji: "💎" },
+    "solana": { code: "sol", kind: "crypto", fa: "سولانا", emoji: "💎" },
+    "tron": { code: "trx", kind: "crypto", fa: "ترون", emoji: "💎" },
+    "dogecoin": { code: "doge", kind: "crypto", fa: "دوج‌کوین", emoji: "💎" },
+    "cardano": { code: "ada", kind: "crypto", fa: "کاردانو", emoji: "💎" },
+    "bitcoin cash": { code: "bch", kind: "crypto", fa: "بیت‌کوین‌کش", emoji: "💎" },
+    "chainlink": { code: "link", kind: "crypto", fa: "چین‌لینک", emoji: "💎" },
+    "monero": { code: "xmr", kind: "crypto", fa: "مونرو", emoji: "💎" },
+    "stellar": { code: "xlm", kind: "crypto", fa: "استلار", emoji: "💎" },
+    "zcash": { code: "zec", kind: "crypto", fa: "زی‌کش", emoji: "💎" },
+    "litecoin": { code: "ltc", kind: "crypto", fa: "لایت‌کوین", emoji: "💎" },
+    "polkadot": { code: "dot", kind: "crypto", fa: "پولکادات", emoji: "💎" },
+    "toncoin": { code: "ton", kind: "crypto", fa: "تون", emoji: "💎" },
+    "filecoin": { code: "fil", kind: "crypto", fa: "فایل‌کوین", emoji: "💎" },
+    "cosmos": { code: "atom", kind: "crypto", fa: "کازماس", emoji: "💎" }
+  };
+
+  // Find USD rate in toman (to convert crypto USD -> toman)
+  let usdToman: number | null = null;
+  for (const row of arr) {
+    if (!row?.name) continue;
+    const { cleanName } = extractUnitFromName(String(row.name));
+    const key = cleanName.toLowerCase();
+    if (key === "us dollar") {
+      const n = parseNumberLoose(row.price);
+      if (n != null) usdToman = n;
+      break;
+    }
+  }
+
+  for (const row of arr) {
+    if (!row?.name) continue;
+
+    const { unit, cleanName } = extractUnitFromName(String(row.name));
+    const nameLower = cleanName.toLowerCase();
+    const priceNum = parseNumberLoose(row.price);
+    if (priceNum == null) continue;
+
+    const mapped = NAME_TO_CODE[nameLower];
+    const code = mapped?.code ?? normalizeKeyFromTitle(cleanName);
+
+    // Determine kind
+    let kind: Rate["kind"] = "currency";
+    if (mapped?.kind) kind = mapped.kind;
+    else if (typeof row.price === "number") kind = "crypto";
+    else {
+      const n = nameLower;
+      if (n.includes("gold") || n.includes("azadi") || n.includes("emami") || n.includes("gerami")) kind = "gold";
+      else kind = "currency";
+    }
+
+    // For crypto/USD-priced assets: store USD + toman (using USD rate)
+    let tomanPrice = priceNum;
+    let usdPrice: number | undefined = undefined;
+
+    if (typeof row.price === "number") {
+      usdPrice = priceNum;
+      if (usdToman != null) {
+        tomanPrice = priceNum * usdToman;
       }
+      kind = "crypto";
+    } else if (nameLower === "gold ounce" || nameLower === "pax gold" || nameLower === "tether gold") {
+      // In this dataset these are typically USD-formatted strings.
+      usdPrice = priceNum;
+      if (usdToman != null) {
+        tomanPrice = priceNum * usdToman;
+      }
+      kind = "crypto";
     }
+
+    const meta = mapped
+      ? { emoji: mapped.emoji, fa: mapped.fa }
+      : (META[code] ?? { emoji: kind === "crypto" ? "💎" : "💱", fa: cleanName });
+
+    rates[code] = {
+      price: tomanPrice,
+      unit,
+      kind,
+      title: cleanName,
+      emoji: meta.emoji,
+      fa: meta.fa,
+      usdPrice
+    };
   }
 
-  // 2. Process Crypto CSV
-  let usdToToman = rates["usd"] ? (rates["usd"].price / rates["usd"].unit) : 0;
-  if (usdToToman === 0) usdToToman = 60000; 
+  const stored: Stored = {
+    fetchedAtMs,
+    source: PRICES_JSON_URL,
+    rates
+  };
 
-  if (resCsv.ok) {
-    const csvText = await resCsv.text();
-    const cryptoItems = parseCSV(csvText);
-    
-    // Check USDT price from CSV to adjust if needed, but stick to JSON USD for base
-    const usdt = cryptoItems.find(c => c.symbol === "usdt");
-    if (usdt && Math.abs(usdt.price - 1) > 0.1) {
-    }
-
-    for (const c of cryptoItems) {
-      // Skip stablecoins if you want, or keep them. keeping them is better.
-      // If the symbol exists in fiat (unlikely except USD?), skip
-      if (rates[c.symbol] && rates[c.symbol].kind === "currency") continue;
-
-      const tomanPrice = c.price * usdToToman;
-      rates[c.symbol] = {
-        price: tomanPrice,
-        unit: 1,
-        kind: "crypto",
-        title: c.name,
-        emoji: "💎",
-        fa: c.name,
-        usdPrice: c.price,
-        change24h: c.change
-      };
-    }
-  }
-
-  const stored: Stored = { fetchedAtMs, source: "mixed", rates };
-  const rawHash = await sha256Hex(JSON.stringify(rates));
   return { stored, rawHash };
 }
 
@@ -492,11 +602,13 @@ function buildAll(stored: Stored) {
     const per1 = Math.round(r.price / (r.unit || 1));
     const priceStr = formatToman(per1);
     
-    if (r.kind === "crypto") {
-      const usdP = r.usdPrice ? formatUSD(r.usdPrice) : "?";
-      const changeEmoji = (r.change24h || 0) >= 0 ? "🟢" : "🔴";
-      const changeStr = Math.abs(r.change24h || 0).toFixed(1) + "%";
-      const line = `💎 <b>${r.fa}</b> (${c.toUpperCase()})\n└ ${priceStr} ت | ${usdP}$ | ${changeEmoji} ${changeStr}`;
+        if (r.kind === "crypto") {
+      const usdP = r.usdPrice != null ? formatUSD(r.usdPrice) : "?";
+      const changePart = (typeof r.change24h === "number")
+        ? ` | ${r.change24h >= 0 ? "🟢" : "🔴"} ${Math.abs(r.change24h).toFixed(1)}%`
+        : "";
+      const line = `💎 <b>${r.fa}</b> (${c.toUpperCase()})
+└ ${priceStr} ت | ${usdP}$${changePart}`;
       cryptoItems.push(line);
     } else {
       const meta = META[c] ?? { emoji: "💱", fa: (r.title || c.toUpperCase()) };
