@@ -7,6 +7,7 @@ export interface Env {
 
 const PRICES_URL = "https://raw.githubusercontent.com/joestar9/jojo/refs/heads/main/prices.json";
 
+// لیست سرورهای پرسرعت و پایدار (تست شده)
 const COBALT_INSTANCES = [
   "https://nuko-c.meowing.de",
   "https://cobalt-api.meowing.de",
@@ -342,97 +343,52 @@ async function processCobaltResponse(env: Env, chatId: number, data: any, replyT
   }
 }
 
-function getRequestOptions(urlObj: URL) {
-  const d = urlObj.hostname;
-  
-  if (d.includes("twitter.com") || d.includes("x.com") || d.includes("youtube.com") || d.includes("youtu.be")) {
-    return {};
-  }
-
-  if (d.includes("tiktok.com")) {
-      return {
-          filenamePattern: "classic"
-      };
-  }
-
-  return { vCodec: "h264" };
-}
-
 async function handleCobalt(env: Env, chatId: number, text: string, replyTo?: number) {
   const urlMatch = text.match(/(https?:\/\/[^\s]+)/);
   if (!urlMatch) return false;
 
   let finalUrl = urlMatch[1];
   let urlObj: URL;
+  try { urlObj = new URL(finalUrl); } catch (e) { return false; }
 
-  try {
-    urlObj = new URL(finalUrl);
-  } catch (e) {
-    return false;
-  }
-
+  // 1. Cleanup only critical domains
   if (urlObj.hostname.includes("x.com") || urlObj.hostname.includes("twitter.com")) {
       urlObj.hostname = "twitter.com";
       urlObj.search = ""; 
       finalUrl = urlObj.toString();
   }
 
-  if (urlObj.hostname.includes("instagram.com")) {
-      urlObj.search = "";
-      finalUrl = urlObj.toString();
-  }
-
-  const basePayload = {
-      url: finalUrl,
-      ...getRequestOptions(urlObj)
-  };
-
   await fetch(`https://api.telegram.org/bot${env.TG_TOKEN}/sendChatAction`, {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ chat_id: chatId, action: "upload_video" })
   });
 
+  // 2. PAYLOAD: Prefer RAW (Fastest, no transcoding)
+  const payloadRaw = { url: finalUrl };
+
   for (const baseUrl of COBALT_INSTANCES) {
     try {
-      let endpoint = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
-      if (baseUrl.includes("api/json")) endpoint = baseUrl;
+      // Endpoint logic: prefer /api/json, but respect base structure
+      let endpoint = baseUrl;
+      if (!baseUrl.endsWith("json")) {
+         endpoint = baseUrl.endsWith("/") ? `${baseUrl}api/json` : `${baseUrl}/api/json`;
+      }
 
-      let res = await fetch(endpoint, {
+      // 3. TRY: Only send the URL. Let Cobalt decide the best/fastest format.
+      // This is the key to speed and avoiding timeouts on Twitter/Insta
+      const res = await fetch(endpoint, {
         method: "POST",
         headers: { 
           "Accept": "application/json",
           "Content-Type": "application/json"
         },
-        body: JSON.stringify(basePayload)
+        body: JSON.stringify(payloadRaw)
       });
-
-      // Retry with /api/json if root failed 404
-      if (res.status === 404 && !endpoint.includes("api/json")) {
-           endpoint = endpoint.replace(/\/$/, "") + "/api/json";
-           res = await fetch(endpoint, {
-             method: "POST",
-             headers: { "Accept": "application/json", "Content-Type": "application/json" },
-             body: JSON.stringify(basePayload)
-           });
-      }
 
       if (res.ok) {
         const data = await res.json<any>();
         await processCobaltResponse(env, chatId, data, replyTo);
         return true;
-      }
-      
-      if (Object.keys(basePayload).length > 1) {
-          const minimalRes = await fetch(endpoint, {
-             method: "POST",
-             headers: { "Accept": "application/json", "Content-Type": "application/json" },
-             body: JSON.stringify({ url: finalUrl })
-          });
-          if (minimalRes.ok) {
-             const data = await minimalRes.json<any>();
-             await processCobaltResponse(env, chatId, data, replyTo);
-             return true;
-          }
       }
 
     } catch (e: any) {}
