@@ -150,20 +150,6 @@ const ALIASES: Array<{ keys: string[]; code: string }> = [
   { keys: ["بیت کوین کش", "bch", "bitcoincash"], code: "bch" }
 ];
 
-// Precompiled alias index (fast matching)
-const ALIAS_INDEX: Array<{ code: string; key: string }> = (() => {
-  const out: Array<{ code: string; key: string }> = [];
-  for (const a of ALIASES) {
-    for (const k of a.keys) {
-      const nk = stripPunct(norm(String(k))).replace(/\s+/g, "").trim();
-      if (!nk) continue;
-      out.push({ code: a.code, key: nk });
-    }
-  }
-  // Longer keys first (more specific)
-  out.sort((x, y) => y.key.length - x.key.length);
-  return out;
-})();
 
 function normalizeDigits(input: string) {
   const map: Record<string, string> = {
@@ -187,12 +173,24 @@ function stripPunct(input: string) {
 }
 
 // Pre-normalize alias keys to make matching reliable even with spaces/punctuation/Arabic letters.
-const ALIAS_INDEX: Array<{ code: string; keys: string[] }> = ALIASES.map((a) => ({
-  code: a.code,
-  keys: a.keys
-    .map((k) => stripPunct(norm(k)).replace(/\s+/g, " ").trim().replace(/\s+/g, ""))
-    .filter(Boolean)
-}));
+// We keep keys in "compact" form (no spaces) and sort longer keys first to avoid partial matches winning.
+const ALIAS_INDEX: Array<{ code: string; keys: string[]; maxLen: number }> = (() => {
+  const mapped = ALIASES.map((a) => {
+    const keys = a.keys
+      .map((k) => stripPunct(norm(String(k))).replace(/\s+/g, " ").trim().replace(/\s+/g, ""))
+      .filter(Boolean);
+
+    // Longer keys first (more specific)
+    keys.sort((x, y) => y.length - x.length);
+
+    const maxLen = keys[0]?.length ?? 0;
+    return { code: a.code, keys, maxLen };
+  });
+
+  // Entries with longer keys first
+  mapped.sort((x, y) => y.maxLen - x.maxLen);
+  return mapped;
+})();
 
 function formatToman(n: number) {
   const x = Math.round(n);
