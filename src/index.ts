@@ -91,10 +91,7 @@ const META: Record<string, { emoji: string; fa: string }> = {
   coin_gram: { emoji: "🪙", fa: "سکه گرمی" },
   coin_gerami: { emoji: "🪙", fa: "سکه گرمی" }};
 
-// Aliases are used to understand user messages (Persian/English, common typos, country names, etc.)
-// IMPORTANT: keys are matched after normalization + punctuation removal + whitespace removal.
 const ALIASES: Array<{ keys: string[]; code: string }> = [
-  // Major fiats
   { keys: ["دلار", "دلارامریکا", "دلارآمریکا", "دلار امریکا", "usd", "us dollar", "dollar"], code: "usd" },
   { keys: ["یورو", "eur", "euro"], code: "eur" },
   { keys: ["پوند", "پوندانگلیس", "پوند انگلیس", "gbp", "britishpound"], code: "gbp" },
@@ -124,7 +121,6 @@ const ALIASES: Array<{ keys: string[]; code: string }> = [
   { keys: ["رینگیت", "مالزی", "myr", "ringgit"], code: "myr" },
   { keys: ["روپیه هند", "هند", "inr", "indianrupee"], code: "inr" },
 
-  // Gold & coins
   { keys: ["طلا", "gold", "گرم طلا", "گرمطلای18", "طلای18", "طلای ۱۸", "۱۸"], code: "gold_gram_18k" },
   { keys: ["مثقال", "مثقالطلا", "mithqal"], code: "gold_mithqal" },
   { keys: ["اونس", "انس", "اونس طلا", "goldounce", "ounce"], code: "gold_ounce" },
@@ -134,7 +130,6 @@ const ALIASES: Array<{ keys: string[]; code: string }> = [
   { keys: ["ربع سکه", "ربع", "¼", "coin_quarter_azadi"], code: "coin_quarter_azadi" },
   { keys: ["گرمی", "سکه گرمی", "coin_gerami"], code: "coin_gerami" },
 
-  // Crypto (common)
   { keys: ["بیت", "بیتکوین", "بیت کوین", "btc", "bitcoin"], code: "btc" },
   { keys: ["اتریوم", "eth", "ethereum"], code: "eth" },
   { keys: ["تتر", "usdt", "tether", "tetherusdt"], code: "usdt" },
@@ -175,22 +170,21 @@ function stripPunct(input: string) {
   return input.replace(/[.,!?؟؛:()[\]{}"'«»]/g, " ").replace(/\s+/g, " ").trim();
 }
 
-// Pre-normalize alias keys to make matching reliable even with spaces/punctuation/Arabic letters.
-// We keep keys in "compact" form (no spaces) and sort longer keys first to avoid partial matches winning.
-const ALIAS_INDEX: Array<{ code: string; keys: string[]; maxLen: number }> = (() => {
+const ALIAS_INDEX: Array<{ code: string; spaced: string[]; compact: string[]; maxLen: number }> = (() => {
   const mapped = ALIASES.map((a) => {
-    const keys = a.keys
-      .map((k) => stripPunct(norm(String(k))).replace(/\s+/g, " ").trim().replace(/\s+/g, ""))
+    const spaced = a.keys
+      .map((k) => stripPunct(norm(String(k))).replace(/\s+/g, " ").trim())
       .filter(Boolean);
 
-    // Longer keys first (more specific)
-    keys.sort((x, y) => y.length - x.length);
+    const compact = spaced.map((k) => k.replace(/\s+/g, "")).filter(Boolean);
 
-    const maxLen = keys[0]?.length ?? 0;
-    return { code: a.code, keys, maxLen };
+    spaced.sort((x, y) => y.length - x.length);
+    compact.sort((x, y) => y.length - x.length);
+
+    const maxLen = Math.max(spaced[0]?.length ?? 0, compact[0]?.length ?? 0);
+    return { code: a.code, spaced, compact, maxLen };
   });
 
-  // Entries with longer keys first
   mapped.sort((x, y) => y.maxLen - x.maxLen);
   return mapped;
 })();
@@ -272,7 +266,6 @@ async function fetchAndMergeData(env: Env): Promise<{ stored: Stored; rawHash: s
   const rates: Record<string, Rate> = {};
   const fetchedAtMs = Date.now();
 
-  // Helpers
   const extractUnitFromName = (name: string) => {
     const m = name.match(/^\s*(\d+)\s*/);
     if (!m) return { unit: 1, cleanName: name.trim() };
@@ -286,19 +279,16 @@ async function fetchAndMergeData(env: Env): Promise<{ stored: Stored; rawHash: s
     }
     const s = String(v).trim();
     if (!s) return null;
-    // Supports "13,941,086" and "4,443.74"
     const cleaned = s.replace(/,/g, "");
     const n = Number(cleaned);
     return Number.isFinite(n) ? n : null;
   };
 
   const normalizeKeyFromTitle = (title: string) => {
-    // Keep it consistent with findCode(): stripPunct + remove spaces
     const cleaned = stripPunct(title.toLowerCase()).replace(/\s+/g, " ").trim();
     return cleaned.replace(/\s+/g, "");
   };
 
-  // Map some well-known names to stable internal codes
   const NAME_TO_CODE: Record<string, { code: string; kind: Rate["kind"]; fa: string; emoji: string }> = {
     "us dollar": { code: "usd", kind: "currency", fa: "دلار آمریکا", emoji: "🇺🇸" },
     "euro": { code: "eur", kind: "currency", fa: "یورو", emoji: "🇪🇺" },
@@ -339,7 +329,6 @@ async function fetchAndMergeData(env: Env): Promise<{ stored: Stored; rawHash: s
     "¼azadi": { code: "coin_quarter_azadi", kind: "gold", fa: "ربع سکه", emoji: "🪙" },
     "gerami": { code: "coin_gerami", kind: "gold", fa: "سکه گرمی", emoji: "🪙" },
 
-    // Crypto (common)
     "bitcoin": { code: "btc", kind: "crypto", fa: "بیت‌کوین", emoji: "💎" },
     "ethereum": { code: "eth", kind: "crypto", fa: "اتریوم", emoji: "💎" },
     "tether usdt": { code: "usdt", kind: "crypto", fa: "تتر", emoji: "💎" },
@@ -362,7 +351,6 @@ async function fetchAndMergeData(env: Env): Promise<{ stored: Stored; rawHash: s
     "cosmos": { code: "atom", kind: "crypto", fa: "کازماس", emoji: "💎" }
   };
 
-  // Find USD rate in toman (to convert crypto USD -> toman)
   let usdToman: number | null = null;
   for (const row of arr) {
     if (!row?.name) continue;
@@ -386,7 +374,6 @@ async function fetchAndMergeData(env: Env): Promise<{ stored: Stored; rawHash: s
     const mapped = NAME_TO_CODE[nameLower];
     const code = mapped?.code ?? normalizeKeyFromTitle(cleanName);
 
-    // Determine kind
     let kind: Rate["kind"] = "currency";
     if (mapped?.kind) kind = mapped.kind;
     else if (typeof row.price === "number") kind = "crypto";
@@ -396,7 +383,6 @@ async function fetchAndMergeData(env: Env): Promise<{ stored: Stored; rawHash: s
       else kind = "currency";
     }
 
-    // For crypto/USD-priced assets: store USD + toman (using USD rate)
     let tomanPrice = priceNum;
     let usdPrice: number | undefined = undefined;
 
@@ -407,7 +393,6 @@ async function fetchAndMergeData(env: Env): Promise<{ stored: Stored; rawHash: s
       }
       kind = "crypto";
     } else if (nameLower === "gold ounce" || nameLower === "pax gold" || nameLower === "tether gold") {
-      // In this dataset these are typically USD-formatted strings.
       usdPrice = priceNum;
       if (usdToman != null) {
         tomanPrice = priceNum * usdToman;
@@ -454,8 +439,6 @@ async function refreshRates(env: Env) {
 }
 
 function parsePersianNumber(tokens: string[]): number | null {
-  // Supports phrases like:
-  // «دویست میلیون», «دویست هزار», «یک میلیارد و دویست میلیون», «سی و پنج هزار» ...
   const ones: Record<string, number> = {
     "یک": 1, "یه": 1, "دو": 2, "سه": 3, "چهار": 4, "پنج": 5, "شش": 6, "شیش": 6, "هفت": 7, "هشت": 8, "نه": 9
   };
@@ -520,7 +503,6 @@ function parsePersianNumber(tokens: string[]): number | null {
       continue;
     }
     if (!addSmall(w)) {
-      // Unknown word
       return null;
     }
   }
@@ -530,11 +512,6 @@ function parsePersianNumber(tokens: string[]): number | null {
 }
 
 function parseDigitsWithScale(text: string): number | null {
-  // Examples:
-  // 200 میلیون
-  // ۲۰۰میلیون
-  // 200,000
-  // 200k
   const t = normalizeDigits(text);
   const m = t.match(/(\d+(?:\.\d+)?)(?:\s*(هزار|میلیون|ملیون|میلیارد|بیلیون|تریلیون|k|m|b))?/i);
   if (!m) return null;
@@ -549,22 +526,33 @@ function parseDigitsWithScale(text: string): number | null {
   return num * mul;
 }
 
+function escapeRegExp(s: string) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function hasBounded(haystack: string, needle: string) {
+  if (!needle) return false;
+  const re = new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(needle)}(?![\\p{L}\\p{N}])`, "iu");
+  return re.test(haystack);
+}
+
 function findCode(textNorm: string, rates: Record<string, Rate>) {
   const cleaned = stripPunct(textNorm).replace(/\s+/g, " ").trim();
   const compact = cleaned.replace(/\s+/g, "");
 
-  // 1) Alias index (normalized)
   for (const a of ALIAS_INDEX) {
-    for (const k of a.keys) {
-      if (k && compact.includes(k)) return a.code;
+    for (const k of a.spaced) {
+      if (hasBounded(cleaned, k)) return a.code;
+    }
+    for (const k of a.compact) {
+      if (hasBounded(compact, k)) return a.code;
     }
   }
 
-  // 2) Some high-value composed patterns (helps with typos like «دلار کاندا»)
-  if (compact.includes("دلار") && (compact.includes("کانادا") || compact.includes("کاندا") || compact.includes("کاندایی"))) {
+  if (hasBounded(cleaned, "دلار") && (hasBounded(cleaned, "کانادا") || hasBounded(cleaned, "کاندا") || hasBounded(cleaned, "کانادایی") || hasBounded(cleaned, "کاندایی"))) {
     if (rates["cad"]) return "cad";
   }
-  if (compact.includes("دینار") && (compact.includes("عراق") || compact.includes("عراقی"))) {
+  if (hasBounded(cleaned, "دینار") && (hasBounded(cleaned, "عراق") || hasBounded(cleaned, "عراقی"))) {
     if (rates["iqd"]) return "iqd";
   }
 
@@ -573,23 +561,20 @@ function findCode(textNorm: string, rates: Record<string, Rate>) {
     const candidate = m[1].toLowerCase();
     if (rates[candidate]) return candidate;
   }
-  
+
   for (const key in rates) {
-    if (compact === key || compact === rates[key].title.toLowerCase().replace(/\s+/g, "")) return key;
+    const t = rates[key]?.title ? stripPunct(norm(rates[key].title)).replace(/\s+/g, "") : "";
+    if (compact === key || (t && compact === t)) return key;
   }
-  
+
   return null;
 }
-
 function extractAmount(textNorm: string) {
   const cleaned = stripPunct(textNorm).replace(/\s+/g, " ").trim();
-  // 1) Digits (with optional scale word)
   const digitScaled = parseDigitsWithScale(cleaned);
   if (digitScaled != null && digitScaled > 0) return digitScaled;
 
-  // 2) Persian words (with هزار/میلیون/میلیارد...)
   const tokens = cleaned.split(" ").filter(Boolean);
-  // Try all windows (up to 10 tokens) to find a valid number phrase.
   const maxWin = Math.min(tokens.length, 10);
   for (let w = maxWin; w >= 1; w--) {
     for (let i = 0; i + w <= tokens.length; i++) {
@@ -807,7 +792,6 @@ type PriceListItem = {
   price: string;
 };
 
-// A small curated map for nicer crypto labels (falls back to CSV name if missing)
 const CRYPTO_META: Record<string, { emoji: string; fa: string }> = {
   btc: { emoji: "₿", fa: "بیت‌کوین" },
   eth: { emoji: "⟠", fa: "اتریوم" },
@@ -822,7 +806,6 @@ const CRYPTO_META: Record<string, { emoji: string; fa: string }> = {
 };
 
 function getUpdateTimeStr(stored: Stored) {
-  // Keep the original time behavior (IR time) used in buildAll()
   const date = new Date(stored.fetchedAtMs + (3.5 * 3600000));
   return date.toISOString().substr(11, 5);
 }
@@ -878,7 +861,6 @@ function buildPriceItems(stored: Stored, category: PriceCategory): PriceListItem
     return items;
   }
 
-  // fiat + gold
   const goldCodes: string[] = [];
   const currencyCodes: string[] = [];
 
@@ -923,7 +905,6 @@ function buildPricesKeyboard(category: PriceCategory, page: number, totalPages: 
 
   const rows: Array<Array<{ text: string; callback_data: string }>> = [];
 
-  // Two-column glass style: (emoji + name) | (price)
   for (const it of slice) {
     const cb = `show:${category}:${it.code}:${page}`;
     rows.push([
@@ -1143,7 +1124,6 @@ export default {
         await tgAnswerCallback(env, cb.id, "📩 ارسال شد");
         const stored = await getStoredOrRefresh(env, ctx);
         const text = buildPriceDetailText(stored, category, code);
-        // Send as a separate message (requested behavior)
         await tgSend(env, chatId, text);
         return new Response("ok");
       } else if (data === "get_all_prices") {
