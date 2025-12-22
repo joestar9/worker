@@ -14,7 +14,6 @@ const COBALT_INSTANCES = [
   "https://capi.3kh0.net",
   "https://cobalt-api.kwiatekmiki.com",
   "https://downloadapi.stuff.solutions",
-  "https://co.wuk.sh/api/json",
   "https://nachos.imput.net",
   "https://sunny.imput.net",
   "https://blossom.imput.net",
@@ -344,12 +343,77 @@ async function processCobaltResponse(env: Env, chatId: number, data: any, replyT
   }
 }
 
+function getRequestOptions(urlObj: URL) {
+  const d = urlObj.hostname;
+  
+  if (d.includes("instagram.com")) {
+    return {
+      vCodec: "h264",
+      vQuality: "720",
+      aFormat: "mp3",
+      filenamePattern: "classic"
+    };
+  }
+  
+  if (d.includes("twitter.com") || d.includes("x.com")) {
+    return {
+      // Twitter fails if we force h264. We must send NO vCodec to get original
+      filenamePattern: "classic"
+    };
+  }
+
+  if (d.includes("youtube.com") || d.includes("youtu.be")) {
+    return {
+      vCodec: "h264",
+      vQuality: "720",
+      filenamePattern: "classic"
+    };
+  }
+
+  if (d.includes("tiktok.com")) {
+     return {
+         vCodec: "h264", 
+         filenamePattern: "classic" 
+     };
+  }
+
+  return { vCodec: "h264" };
+}
+
 async function handleCobalt(env: Env, chatId: number, text: string, replyTo?: number) {
   const urlMatch = text.match(/(https?:\/\/[^\s]+)/);
   if (!urlMatch) return false;
 
-  const targetUrl = urlMatch[1];
+  let finalUrl = urlMatch[1];
+  let urlObj: URL;
+
+  try {
+    urlObj = new URL(finalUrl);
+  } catch (e) {
+    return false;
+  }
+
+  // --- DOMAIN SPECIFIC CLEANUP ---
   
+  // 1. Twitter / X Cleanup
+  if (urlObj.hostname.includes("x.com") || urlObj.hostname.includes("twitter.com")) {
+      urlObj.hostname = "twitter.com";
+      urlObj.search = ""; // Remove ?s=20&t=... totally
+      finalUrl = urlObj.toString();
+  }
+
+  // 2. Instagram Cleanup
+  if (urlObj.hostname.includes("instagram.com")) {
+      // Remove params but keep path
+      urlObj.search = "";
+      finalUrl = urlObj.toString();
+  }
+
+  const payload = {
+      url: finalUrl,
+      ...getRequestOptions(urlObj)
+  };
+
   await fetch(`https://api.telegram.org/bot${env.TG_TOKEN}/sendChatAction`, {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ chat_id: chatId, action: "upload_video" })
@@ -359,7 +423,7 @@ async function handleCobalt(env: Env, chatId: number, text: string, replyTo?: nu
     try {
       const endpoint = baseUrl.endsWith("json") ? baseUrl : baseUrl; 
       
-      const apiRes = await fetch(endpoint, {
+      const res = await fetch(endpoint, {
         method: "POST",
         headers: { 
           "Accept": "application/json",
@@ -368,33 +432,14 @@ async function handleCobalt(env: Env, chatId: number, text: string, replyTo?: nu
           "Origin": "https://cobalt.tools",
           "Referer": "https://cobalt.tools/"
         },
-        body: JSON.stringify({ 
-          url: targetUrl,
-          vCodec: "h264"
-        })
+        body: JSON.stringify(payload)
       });
 
-      if (!apiRes.ok) {
-        if (apiRes.status === 404 && !baseUrl.includes("json")) {
-          const retryUrl = baseUrl.endsWith("/") ? `${baseUrl}api/json` : `${baseUrl}/api/json`;
-          const retryRes = await fetch(retryUrl, {
-            method: "POST",
-            headers: { "Accept": "application/json", "Content-Type": "application/json" },
-            body: JSON.stringify({ url: targetUrl, vCodec: "h264" })
-          });
-          if (retryRes.ok) {
-            const data = await retryRes.json<any>();
-            await processCobaltResponse(env, chatId, data, replyTo);
-            return true; 
-          }
-        }
-        throw new Error(`HTTP ${apiRes.status}`);
+      if (res.ok) {
+        const data = await res.json<any>();
+        await processCobaltResponse(env, chatId, data, replyTo);
+        return true;
       }
-      
-      const data = await apiRes.json<any>();
-      await processCobaltResponse(env, chatId, data, replyTo);
-      return true;
-
     } catch (e: any) {}
   }
 
