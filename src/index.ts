@@ -8,6 +8,9 @@ export interface Env {
 // --- CONFIGURATION ---
 const PRICES_URL = "https://raw.githubusercontent.com/joestar9/jojo/refs/heads/main/prices.json";
 
+// لیست هوشمند سرورهای کبالت
+// نکته: ما آدرس‌های API را دقیق وارد می‌کنیم.
+// سرورهای imput.net (رسمی) معمولاً حساس‌تر هستند، بنابراین در انتهای لیست قرار گرفتند.
 const COBALT_INSTANCES = [
   // Community Instances (معمولاً محدودیت کمتری دارند و سریع‌ترند)
   "https://cobalt-api.meowing.de",           // v10
@@ -16,6 +19,8 @@ const COBALT_INSTANCES = [
   "https://cobalt-api.kwiatekmiki.com",      // v10
   "https://downloadapi.stuff.solutions",     // v10
   "https://co.wuk.sh/api/json",              // Old reliable (v7/v10 hybrid)
+  
+  // Official Processing Nodes (ممکن است نیاز به هدرهای خاص داشته باشند)
   "https://nachos.imput.net",
   "https://sunny.imput.net",
   "https://blossom.imput.net",
@@ -555,4 +560,11 @@ export default {
       const r = stored.rates[code];
       if (!r) return;
 
-      const out
+      const out = r.kind === "gold" ? replyGold(r, amount, stored) : replyCurrency(r, amount);
+      await tgSend(env, chatId, out, replyTo);
+    };
+
+    ctx.waitUntil(run());
+    return new Response("ok");
+  }
+};
