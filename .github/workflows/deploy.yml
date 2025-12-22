@@ -16,6 +16,7 @@ jobs:
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          wranglerVersion: "4.56.0"
           secrets: |
             TG_TOKEN
             TG_SECRET
