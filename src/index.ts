@@ -697,17 +697,13 @@ function buildCategoryHeaderText(category: PriceCategory, page: number, totalPag
     return [
       "🪙 <b>قیمت ارز دیجیتال</b>",
       `📄 صفحه ${page + 1}/${totalPages}`,
-      `🕐 <b>بروزرسانی:</b> ${timeStr}`,
-      "",
-      "👇 لیست به صورت ۳ ستونه روی دکمه‌هاست (ایموجی | قیمت | نام):"
+      `🕐 <b>بروزرسانی:</b> ${timeStr}`
     ].join("\n");
   }
   return [
     "💱 <b>قیمت ارز و طلا</b>",
     `📄 صفحه ${page + 1}/${totalPages}`,
-    `🕐 <b>بروزرسانی:</b> ${timeStr}`,
-    "",
-    "👇 لیست به صورت ۳ ستونه روی دکمه‌هاست (ایموجی | قیمت | نام):"
+    `🕐 <b>بروزرسانی:</b> ${timeStr}`
   ].join("\n");
 }
 
