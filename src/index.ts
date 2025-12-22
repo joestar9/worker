@@ -7,17 +7,16 @@ export interface Env {
 
 const PRICES_URL = "https://raw.githubusercontent.com/joestar9/jojo/refs/heads/main/prices.json";
 
-// لیست سرورهای پرسرعت و پایدار (تست شده)
 const COBALT_INSTANCES = [
-  "https://nuko-c.meowing.de",
+  "https://co.wuk.sh/api/json",
   "https://cobalt-api.meowing.de",
   "https://cobalt-backend.canine.tools",
-  "https://capi.3kh0.net",
+  "https://api.cobalt.tools/api/json",
+  "https://downloadapi.stuff.solutions",
   "https://cobalt-api.kwiatekmiki.com",
+  "https://capi.3kh0.net",
   "https://nachos.imput.net",
-  "https://sunny.imput.net",
-  "https://blossom.imput.net",
-  "https://kityune.imput.net"
+  "https://sunny.imput.net"
 ];
 
 const KEY_RATES = "rates:latest";
@@ -298,7 +297,7 @@ async function tgSendVideo(env: Env, chatId: number, videoUrl: string, caption: 
     parse_mode: "HTML"
   };
   if (replyTo) { body.reply_to_message_id = replyTo; body.allow_sending_without_reply = true; }
-  await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(e => console.error(e));
+  await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(() => {});
 }
 
 async function tgSendPhoto(env: Env, chatId: number, photoUrl: string, caption: string, replyTo?: number) {
@@ -310,7 +309,7 @@ async function tgSendPhoto(env: Env, chatId: number, photoUrl: string, caption: 
     parse_mode: "HTML"
   };
   if (replyTo) { body.reply_to_message_id = replyTo; body.allow_sending_without_reply = true; }
-  await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(e => console.error(e));
+  await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(() => {});
 }
 
 async function tgSendAudio(env: Env, chatId: number, audioUrl: string, caption: string, replyTo?: number) {
@@ -322,11 +321,11 @@ async function tgSendAudio(env: Env, chatId: number, audioUrl: string, caption: 
     parse_mode: "HTML"
   };
   if (replyTo) { body.reply_to_message_id = replyTo; body.allow_sending_without_reply = true; }
-  await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(e => console.error(e));
+  await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(() => {});
 }
 
 async function processCobaltResponse(env: Env, chatId: number, data: any, replyTo?: number) {
-  if (data.status === "error") throw new Error(data.text || "Cobalt Error");
+  if (data.status === "error") throw new Error(data.text);
 
   if (data.status === "stream" || data.status === "redirect") {
     await tgSendVideo(env, chatId, data.url, "✅", replyTo);
@@ -339,7 +338,7 @@ async function processCobaltResponse(env: Env, chatId: number, data: any, replyT
       else if (item.type === "audio") await tgSendAudio(env, chatId, item.url, "", replyTo);
     }
   } else {
-    throw new Error("Unknown response status: " + data.status);
+    throw new Error("Unknown");
   }
 }
 
@@ -351,10 +350,13 @@ async function handleCobalt(env: Env, chatId: number, text: string, replyTo?: nu
   let urlObj: URL;
   try { urlObj = new URL(finalUrl); } catch (e) { return false; }
 
-  // 1. Cleanup only critical domains
-  if (urlObj.hostname.includes("x.com") || urlObj.hostname.includes("twitter.com")) {
+  const isTwitter = urlObj.hostname.includes("x.com") || urlObj.hostname.includes("twitter.com");
+  if (isTwitter) {
       urlObj.hostname = "twitter.com";
       urlObj.search = ""; 
+      finalUrl = urlObj.toString();
+  } else if (urlObj.hostname.includes("instagram.com")) {
+      urlObj.search = "";
       finalUrl = urlObj.toString();
   }
 
@@ -363,38 +365,59 @@ async function handleCobalt(env: Env, chatId: number, text: string, replyTo?: nu
       body: JSON.stringify({ chat_id: chatId, action: "upload_video" })
   });
 
-  // 2. PAYLOAD: Prefer RAW (Fastest, no transcoding)
-  const payloadRaw = { url: finalUrl };
+  const payload: any = { url: finalUrl };
+  if (!isTwitter) {
+      payload.vCodec = "h264";
+      payload.vQuality = "480";
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 60000);
 
   for (const baseUrl of COBALT_INSTANCES) {
     try {
-      // Endpoint logic: prefer /api/json, but respect base structure
       let endpoint = baseUrl;
       if (!baseUrl.endsWith("json")) {
          endpoint = baseUrl.endsWith("/") ? `${baseUrl}api/json` : `${baseUrl}/api/json`;
       }
 
-      // 3. TRY: Only send the URL. Let Cobalt decide the best/fastest format.
-      // This is the key to speed and avoiding timeouts on Twitter/Insta
       const res = await fetch(endpoint, {
         method: "POST",
         headers: { 
           "Accept": "application/json",
           "Content-Type": "application/json"
         },
-        body: JSON.stringify(payloadRaw)
+        body: JSON.stringify(payload),
+        signal: controller.signal
       });
 
       if (res.ok) {
+        clearTimeout(timeoutId);
         const data = await res.json<any>();
         await processCobaltResponse(env, chatId, data, replyTo);
         return true;
       }
+      
+      if (!isTwitter) {
+         const res2 = await fetch(endpoint, {
+            method: "POST",
+            headers: { "Accept": "application/json", "Content-Type": "application/json" },
+            body: JSON.stringify({ url: finalUrl, vQuality: "480" }),
+            signal: controller.signal
+         });
+         if (res2.ok) {
+            clearTimeout(timeoutId);
+            const data2 = await res2.json<any>();
+            await processCobaltResponse(env, chatId, data2, replyTo);
+            return true;
+         }
+      }
 
     } catch (e: any) {}
   }
-
-  await tgSend(env, chatId, `❌ خطا در دانلود.`, replyTo);
+  
+  clearTimeout(timeoutId);
+  await tgSend(env, chatId, `❌`, replyTo);
   return true;
 }
 
