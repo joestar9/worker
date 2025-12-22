@@ -5,7 +5,7 @@ export interface Env {
   ADMIN_KEY: string;
 }
 
-const PRICES_URL = "https://raw.githubusercontent.com/joestar9/jojo/refs/heads/main/prices.json";
+const PRICES_URL = "https://raw.githubusercontent.com/joestar9/price-scraper/refs/heads/main/prices.json";
 
 const COBALT_INSTANCES = [
   "https://cobalt-api.meowing.de",
