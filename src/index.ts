@@ -8,6 +8,7 @@ export interface Env {
 const PRICES_URL = "https://raw.githubusercontent.com/joestar9/jojo/refs/heads/main/prices.json";
 
 const COBALT_INSTANCES = [
+  "https://nuko-c.meowing.de",
   "https://cobalt-api.meowing.de",
   "https://cobalt-backend.canine.tools",
   "https://capi.3kh0.net",
@@ -298,38 +299,49 @@ async function tgSendVideo(env: Env, chatId: number, videoUrl: string, caption: 
     parse_mode: "HTML"
   };
   if (replyTo) { body.reply_to_message_id = replyTo; body.allow_sending_without_reply = true; }
-  
-  const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-  if (!res.ok) console.error("TG Video Error:", await res.text());
+  await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(e => console.error(e));
 }
 
 async function tgSendPhoto(env: Env, chatId: number, photoUrl: string, caption: string, replyTo?: number) {
-    const url = `https://api.telegram.org/bot${env.TG_TOKEN}/sendPhoto`;
-    const body: any = { 
-      chat_id: chatId, 
-      photo: photoUrl, 
-      caption: caption, 
-      parse_mode: "HTML"
-    };
-    if (replyTo) { body.reply_to_message_id = replyTo; body.allow_sending_without_reply = true; }
-    await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(() => {});
+  const url = `https://api.telegram.org/bot${env.TG_TOKEN}/sendPhoto`;
+  const body: any = { 
+    chat_id: chatId, 
+    photo: photoUrl, 
+    caption: caption, 
+    parse_mode: "HTML"
+  };
+  if (replyTo) { body.reply_to_message_id = replyTo; body.allow_sending_without_reply = true; }
+  await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(e => console.error(e));
+}
+
+async function tgSendAudio(env: Env, chatId: number, audioUrl: string, caption: string, replyTo?: number) {
+  const url = `https://api.telegram.org/bot${env.TG_TOKEN}/sendAudio`;
+  const body: any = { 
+    chat_id: chatId, 
+    audio: audioUrl, 
+    caption: caption, 
+    parse_mode: "HTML"
+  };
+  if (replyTo) { body.reply_to_message_id = replyTo; body.allow_sending_without_reply = true; }
+  await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(e => console.error(e));
 }
 
 async function processCobaltResponse(env: Env, chatId: number, data: any, replyTo?: number) {
-    if (data.status === "error") throw new Error(data.text || "Cobalt Error");
+  if (data.status === "error") throw new Error(data.text || "Cobalt Error");
 
-    if (data.status === "stream" || data.status === "redirect") {
-        await tgSendVideo(env, chatId, data.url, "✅ دانلود شد", replyTo);
-    } 
-    else if (data.status === "picker" && data.picker && data.picker.length > 0) {
-        const items = data.picker.slice(0, 4); 
-        for (const item of items) {
-            if (item.type === "video") await tgSendVideo(env, chatId, item.url, "", replyTo);
-            else if (item.type === "photo") await tgSendPhoto(env, chatId, item.url, "", replyTo);
-        }
-    } else {
-        throw new Error("Unknown response");
+  if (data.status === "stream" || data.status === "redirect") {
+    await tgSendVideo(env, chatId, data.url, "✅", replyTo);
+  } 
+  else if (data.status === "picker" && data.picker && data.picker.length > 0) {
+    const items = data.picker.slice(0, 5); 
+    for (const item of items) {
+      if (item.type === "video") await tgSendVideo(env, chatId, item.url, "", replyTo);
+      else if (item.type === "photo") await tgSendPhoto(env, chatId, item.url, "", replyTo);
+      else if (item.type === "audio") await tgSendAudio(env, chatId, item.url, "", replyTo);
     }
+  } else {
+    throw new Error("Unknown response");
+  }
 }
 
 async function handleCobalt(env: Env, chatId: number, text: string, replyTo?: number) {
@@ -344,51 +356,49 @@ async function handleCobalt(env: Env, chatId: number, text: string, replyTo?: nu
   });
 
   for (const baseUrl of COBALT_INSTANCES) {
-      try {
-          const endpoint = baseUrl.endsWith("json") ? baseUrl : baseUrl; 
-          
-          const apiRes = await fetch(endpoint, {
+    try {
+      const endpoint = baseUrl.endsWith("json") ? baseUrl : baseUrl; 
+      
+      const apiRes = await fetch(endpoint, {
+        method: "POST",
+        headers: { 
+          "Accept": "application/json",
+          "Content-Type": "application/json",
+          "User-Agent": "Mozilla/5.0 (compatible; TelegramBot/1.0)",
+          "Origin": "https://cobalt.tools",
+          "Referer": "https://cobalt.tools/"
+        },
+        body: JSON.stringify({ 
+          url: targetUrl,
+          vCodec: "h264"
+        })
+      });
+
+      if (!apiRes.ok) {
+        if (apiRes.status === 404 && !baseUrl.includes("json")) {
+          const retryUrl = baseUrl.endsWith("/") ? `${baseUrl}api/json` : `${baseUrl}/api/json`;
+          const retryRes = await fetch(retryUrl, {
             method: "POST",
-            headers: { 
-              "Accept": "application/json",
-              "Content-Type": "application/json",
-              "User-Agent": "Mozilla/5.0 (compatible; TelegramBot/1.0)",
-              "Origin": "https://cobalt.tools",
-              "Referer": "https://cobalt.tools/"
-            },
-            body: JSON.stringify({ 
-              url: targetUrl,
-              vCodec: "h264"
-            })
+            headers: { "Accept": "application/json", "Content-Type": "application/json" },
+            body: JSON.stringify({ url: targetUrl, vCodec: "h264" })
           });
-
-          if (!apiRes.ok) {
-             if (apiRes.status === 404 && !baseUrl.includes("json")) {
-                 const retryUrl = baseUrl.endsWith("/") ? `${baseUrl}api/json` : `${baseUrl}/api/json`;
-                 const retryRes = await fetch(retryUrl, {
-                    method: "POST",
-                    headers: { "Accept": "application/json", "Content-Type": "application/json" },
-                    body: JSON.stringify({ url: targetUrl, vCodec: "h264" })
-                 });
-                 if (retryRes.ok) {
-                     const data = await retryRes.json<any>();
-                     await processCobaltResponse(env, chatId, data, replyTo);
-                     return true; 
-                 }
-             }
-             throw new Error(`HTTP ${apiRes.status}`);
+          if (retryRes.ok) {
+            const data = await retryRes.json<any>();
+            await processCobaltResponse(env, chatId, data, replyTo);
+            return true; 
           }
-          
-          const data = await apiRes.json<any>();
-          await processCobaltResponse(env, chatId, data, replyTo);
-          return true;
-
-      } catch (e: any) {
-          console.error(`Error on instance ${baseUrl}:`, e.message);
+        }
+        throw new Error(`HTTP ${apiRes.status}`);
       }
+      
+      const data = await apiRes.json<any>();
+      await processCobaltResponse(env, chatId, data, replyTo);
+      return true;
+
+    } catch (e: any) {}
   }
 
-  await tgSend(env, chatId, `❌ خطا در دانلود.`, replyTo);
+  await tgSend(env, chatId, `❌`, replyTo);
   return true;
 }
 
@@ -450,8 +460,8 @@ function replyGold(rGold: Rate, amount: number, stored: Stored) {
 function helpText() {
   return [
     "دستورات:",
-    "لینک (اینستاگرام، یوتیوب، توییتر و...)",
-    "دلار، یورو، طلا...",
+    "لینک (Instagram, Youtube, Twitter, Tiktok, SoundCloud, ...)",
+    "دلار، یورو، طلا",
     "/all",
     "/refresh <key>"
   ].join("\n");
