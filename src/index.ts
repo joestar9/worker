@@ -13,7 +13,6 @@ const COBALT_INSTANCES = [
   "https://cobalt-backend.canine.tools",
   "https://capi.3kh0.net",
   "https://cobalt-api.kwiatekmiki.com",
-  "https://downloadapi.stuff.solutions",
   "https://nachos.imput.net",
   "https://sunny.imput.net",
   "https://blossom.imput.net",
@@ -332,49 +331,28 @@ async function processCobaltResponse(env: Env, chatId: number, data: any, replyT
     await tgSendVideo(env, chatId, data.url, "✅", replyTo);
   } 
   else if (data.status === "picker" && data.picker && data.picker.length > 0) {
-    const items = data.picker.slice(0, 5); 
+    const items = data.picker.slice(0, 10); 
     for (const item of items) {
       if (item.type === "video") await tgSendVideo(env, chatId, item.url, "", replyTo);
       else if (item.type === "photo") await tgSendPhoto(env, chatId, item.url, "", replyTo);
       else if (item.type === "audio") await tgSendAudio(env, chatId, item.url, "", replyTo);
     }
   } else {
-    throw new Error("Unknown response");
+    throw new Error("Unknown response status: " + data.status);
   }
 }
 
 function getRequestOptions(urlObj: URL) {
   const d = urlObj.hostname;
   
-  if (d.includes("instagram.com")) {
-    return {
-      vCodec: "h264",
-      vQuality: "720",
-      aFormat: "mp3",
-      filenamePattern: "classic"
-    };
-  }
-  
-  if (d.includes("twitter.com") || d.includes("x.com")) {
-    return {
-      // Twitter fails if we force h264. We must send NO vCodec to get original
-      filenamePattern: "classic"
-    };
-  }
-
-  if (d.includes("youtube.com") || d.includes("youtu.be")) {
-    return {
-      vCodec: "h264",
-      vQuality: "720",
-      filenamePattern: "classic"
-    };
+  if (d.includes("twitter.com") || d.includes("x.com") || d.includes("youtube.com") || d.includes("youtu.be")) {
+    return {};
   }
 
   if (d.includes("tiktok.com")) {
-     return {
-         vCodec: "h264", 
-         filenamePattern: "classic" 
-     };
+      return {
+          filenamePattern: "classic"
+      };
   }
 
   return { vCodec: "h264" };
@@ -393,23 +371,18 @@ async function handleCobalt(env: Env, chatId: number, text: string, replyTo?: nu
     return false;
   }
 
-  // --- DOMAIN SPECIFIC CLEANUP ---
-  
-  // 1. Twitter / X Cleanup
   if (urlObj.hostname.includes("x.com") || urlObj.hostname.includes("twitter.com")) {
       urlObj.hostname = "twitter.com";
-      urlObj.search = ""; // Remove ?s=20&t=... totally
+      urlObj.search = ""; 
       finalUrl = urlObj.toString();
   }
 
-  // 2. Instagram Cleanup
   if (urlObj.hostname.includes("instagram.com")) {
-      // Remove params but keep path
       urlObj.search = "";
       finalUrl = urlObj.toString();
   }
 
-  const payload = {
+  const basePayload = {
       url: finalUrl,
       ...getRequestOptions(urlObj)
   };
@@ -421,29 +394,54 @@ async function handleCobalt(env: Env, chatId: number, text: string, replyTo?: nu
 
   for (const baseUrl of COBALT_INSTANCES) {
     try {
-      const endpoint = baseUrl.endsWith("json") ? baseUrl : baseUrl; 
-      
-      const res = await fetch(endpoint, {
+      // Try root
+      let endpoint = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
+      // If base ends in /api/json, use that.
+      if (baseUrl.includes("api/json")) endpoint = baseUrl;
+
+      let res = await fetch(endpoint, {
         method: "POST",
         headers: { 
           "Accept": "application/json",
-          "Content-Type": "application/json",
-          "User-Agent": "Mozilla/5.0 (compatible; TelegramBot/1.0)",
-          "Origin": "https://cobalt.tools",
-          "Referer": "https://cobalt.tools/"
+          "Content-Type": "application/json"
         },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(basePayload)
       });
+
+      // Retry with /api/json if root failed 404
+      if (res.status === 404 && !endpoint.includes("api/json")) {
+           endpoint = endpoint.replace(/\/$/, "") + "/api/json";
+           res = await fetch(endpoint, {
+             method: "POST",
+             headers: { "Accept": "application/json", "Content-Type": "application/json" },
+             body: JSON.stringify(basePayload)
+           });
+      }
 
       if (res.ok) {
         const data = await res.json<any>();
         await processCobaltResponse(env, chatId, data, replyTo);
         return true;
       }
+      
+      // Fallback: Retry with ABSOLUTELY MINIMAL payload if custom failed
+      if (Object.keys(basePayload).length > 1) {
+          const minimalRes = await fetch(endpoint, {
+             method: "POST",
+             headers: { "Accept": "application/json", "Content-Type": "application/json" },
+             body: JSON.stringify({ url: finalUrl })
+          });
+          if (minimalRes.ok) {
+             const data = await minimalRes.json<any>();
+             await processCobaltResponse(env, chatId, data, replyTo);
+             return true;
+          }
+      }
+
     } catch (e: any) {}
   }
 
-  await tgSend(env, chatId, `❌`, replyTo);
+  await tgSend(env, chatId, `❌ خطا در دانلود.`, replyTo);
   return true;
 }
 
