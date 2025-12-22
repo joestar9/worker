@@ -396,7 +396,7 @@ async function handleCobalt(env: Env, chatId: number, text: string, replyTo?: nu
   for (const baseUrl of COBALT_INSTANCES) {
     let response: Response | null = null;
     try {
-      const endpoint = `${baseUrl.replace(/\/$/, '')}/api/json`;
+      const endpoint = baseUrl;
       
       response = await fetch(endpoint, {
         method: "POST",
