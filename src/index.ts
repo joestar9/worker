@@ -1,3 +1,7 @@
+const COBALT_UA = "bonbast-telegram-worker/1.0 (+https://example.com)";
+const isCfHtml = (s: string) =>
+  /attention required! \| cloudflare/i.test(s) || /<title>\s*attention required/i.test(s) || /^\s*<!doctype html/i.test(s);
+
 export interface Env {
   BOT_KV: KVNamespace;
   TG_TOKEN: string;
@@ -423,23 +427,19 @@ async function trySendBestFile(env: Env, chatId: number, url: string, filename?:
 }
 
 function toBaseUrl(instance: string) {
-  const u = new URL(instance);
-  u.pathname = u.pathname.replace(/\/+$/, "");
-  return u.toString();
+  return instance.replace(/\/+$/, "");
 }
 
-async function cobaltNew(instance: string, payload: any) {
-  const base = toBaseUrl(instance);
-  const endpoint = `${base}/`;
-  console.log("cobalt_try_new", endpoint);
-  const r = await fetchText(endpoint, {
-    method: "POST",
-    headers: { "Accept": "application/json", "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
-  }, 35000);
-  console.log("cobalt_res_new", { endpoint, ok: r.ok, status: r.status, ms: r.ms, body: r.text.slice(0, 500) });
-  return { endpoint, ...r };
-}
+const r = await fetchText(endpoint, {
+  method: "POST",
+  headers: {
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+    "User-Agent": COBALT_UA
+  },
+  body: JSON.stringify(payload)
+}, 35000);
+console.log("cobalt_res_new", JSON.stringify({ endpoint, ok: r.ok, status: r.status, ms: r.ms, body: r.text.slice(0, 300) }));
 
 async function cobaltOld(instance: string, payload: any) {
   const base = toBaseUrl(instance);
