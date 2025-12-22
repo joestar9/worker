@@ -438,7 +438,7 @@ async function handleCobalt(env: Env, chatId: number, text: string, replyTo?: nu
   }).catch(() => {});
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 60000);
+  const timeoutId = setTimeout(() => controller.abort(), 160000);
 
   const payload: any = { url: finalUrl, vCodec: "h264", vQuality: "480" };
 
