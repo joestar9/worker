@@ -5,22 +5,21 @@ export interface Env {
   ADMIN_KEY: string;
 }
 
-// --- CONFIGURATION ---
 const PRICES_URL = "https://raw.githubusercontent.com/joestar9/jojo/refs/heads/main/prices.json";
 
-// لیست هوشمند سرورهای کبالت
-// نکته: ما آدرس‌های API را دقیق وارد می‌کنیم.
-// سرورهای imput.net (رسمی) معمولاً حساس‌تر هستند، بنابراین در انتهای لیست قرار گرفتند.
 const COBALT_INSTANCES = [
-  // Community Instances (معمولاً محدودیت کمتری دارند و سریع‌ترند)
-  "https://cobalt-api.meowing.de",           // v10
-  "https://cobalt-backend.canine.tools",     // v10
-  "https://capi.3kh0.net",                   // v10
-  "https://cobalt-api.kwiatekmiki.com",      // v10
-  "https://downloadapi.stuff.solutions",     // v10
-  "https://co.wuk.sh/api/json",              // Old reliable (v7/v10 hybrid)
-  
-  // Official Processing Nodes (ممکن است نیاز به هدرهای خاص داشته باشند)
+  "https://cobalt-api.meowing.de",
+  "https://cobalt-backend.canine.tools",
+  "https://capi.3kh0.net",
+  "https://cobalt-api.kwiatekmiki.com",
+  "https://downloadapi.stuff.solutions",
+  "https://co.wuk.sh/api/json",
+  "https://cobalt.canine.tools/",
+  "https://api.cobalt.tools",
+  "https://blossom.imput.net",
+  "https://kityune.imput.net",
+  "https://nachos.imput.net",
+  "https://nuko-c.meowing.de",
   "https://nachos.imput.net",
   "https://sunny.imput.net",
   "https://blossom.imput.net",
