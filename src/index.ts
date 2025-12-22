@@ -81,12 +81,15 @@ const META: Record<string, { emoji: string; fa: string }> = {
   krw: { emoji: "🇰🇷", fa: "وون کره جنوبی" },
   gold_gram_18k: { emoji: "🥇", fa: "گرم طلا ۱۸" },
   gold_mithqal: { emoji: "⚖️", fa: "مثقال طلا" },
-  coin_emami: { emoji: "🌕", fa: "سکه امامی" },
-  coin_bahar: { emoji: "🌕", fa: "سکه بهار آزادی" },
-  coin_half: { emoji: "🌗", fa: "نیم سکه" },
-  coin_quarter: { emoji: "🌘", fa: "ربع سکه" },
-  coin_gram: { emoji: "🌑", fa: "سکه گرمی" }
-};
+  coin_emami: { emoji: "🪙", fa: "سکه امامی" },
+  coin_bahar: { emoji: "🪙", fa: "سکه بهار آزادی" },
+  coin_azadi: { emoji: "🪙", fa: "سکه آزادی" },
+  coin_half: { emoji: "🪙", fa: "نیم سکه" },
+  coin_half_azadi: { emoji: "🪙", fa: "نیم سکه" },
+  coin_quarter: { emoji: "🪙", fa: "ربع سکه" },
+  coin_quarter_azadi: { emoji: "🪙", fa: "ربع سکه" },
+  coin_gram: { emoji: "🪙", fa: "سکه گرمی" },
+  coin_gerami: { emoji: "🪙", fa: "سکه گرمی" }};
 
 // Aliases are used to understand user messages (Persian/English, common typos, country names, etc.)
 // IMPORTANT: keys are matched after normalization + punctuation removal + whitespace removal.
@@ -96,7 +99,7 @@ const ALIASES: Array<{ keys: string[]; code: string }> = [
   { keys: ["یورو", "eur", "euro"], code: "eur" },
   { keys: ["پوند", "پوندانگلیس", "پوند انگلیس", "gbp", "britishpound"], code: "gbp" },
   { keys: ["فرانک", "فرانکسوئیس", "فرانک سوئیس", "chf", "swissfranc"], code: "chf" },
-  { keys: ["دلارکانادا", "دلار کانادا", "دلارکاندا", "دلار کاندا", "کانادا", "کاندایی", "cad", "canadiandollar"], code: "cad" },
+  { keys: ["دلارکانادا","دلار کانادا","دلارکانادایی","دلار کانادایی","دلارکاندا","دلار کاندا","cad","canadiandollar","canada","کاندایی"], code: "cad" },
   { keys: ["دلاراسترالیا", "دلار استرالیا", "استرالیا", "aud", "australiandollar"], code: "aud" },
   { keys: ["درهم", "درهمامارات", "درهم امارات", "امارات", "aed", "uaedirham"], code: "aed" },
   { keys: ["لیر", "لیرترکیه", "لیر ترکیه", "ترکیه", "try", "turkishlira"], code: "try" },
@@ -108,7 +111,7 @@ const ALIASES: Array<{ keys: string[]; code: string }> = [
   { keys: ["ریال قطر", "قطر", "qar", "qataririyal"], code: "qar" },
   { keys: ["دینارکویت", "دینار کویت", "کویت", "kwd", "kuwaitidinar"], code: "kwd" },
   { keys: ["دیناربحرین", "دینار بحرین", "بحرین", "bhd", "bahrainidinar"], code: "bhd" },
-  { keys: ["دینارعراق", "دینار عراق", "عراق", "عراقی", "iqd", "iraqidinar"], code: "iqd" },
+  { keys: ["دینارعراق", "دینار عراق", "عراق", "عراقی", "iqd", "iraqidinar", "دینارعراقی", "دینار عراقی", "iraq"], code: "iqd" },
   { keys: ["کرونسوئد", "کرون سوئد", "سوئد", "sek", "swedishkrona"], code: "sek" },
   { keys: ["کروننروژ", "کرون نروژ", "نروژ", "nok", "norwegiankrone"], code: "nok" },
   { keys: ["کرون دانمارک", "دانمارک", "dkk", "danishkrone"], code: "dkk" },
@@ -924,8 +927,8 @@ function buildPricesKeyboard(category: PriceCategory, page: number, totalPages: 
   for (const it of slice) {
     const cb = `show:${category}:${it.code}:${page}`;
     rows.push([
-      { text: `${it.emoji} ${it.name}`, callback_data: cb },
-      { text: it.price, callback_data: cb }
+      { text: it.price, callback_data: cb },
+      { text: `${it.emoji} ${it.name}`, callback_data: cb }
     ]);
   }
 
@@ -933,9 +936,9 @@ function buildPricesKeyboard(category: PriceCategory, page: number, totalPages: 
   const nextCb = page + 1 < totalPages ? `page:${category}:${page + 1}` : "noop";
 
   rows.push([
-    { text: "⬅️ قبلی", callback_data: prevCb },
+    { text: "بعدی ⬅️", callback_data: nextCb },
     { text: "🏠 خانه", callback_data: "start_menu" },
-    { text: "بعدی ➡️", callback_data: nextCb }
+    { text: "➡️ قبلی", callback_data: prevCb }
   ]);
 
   return { inline_keyboard: rows };
