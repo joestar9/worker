@@ -17,7 +17,7 @@ const COBALT_INSTANCES = [
   "https://cobalt-api.kwiatekmiki.com",
   "https://downloadapi.stuff.solutions",
   "https://co.wuk.sh/api/json",
-  "https://cobalt.canine.tools",
+  "https://cobalt.canine.tools/",
   "https://api.cobalt.tools",
   "https://blossom.imput.net",
   "https://kityune.imput.net",
@@ -445,63 +445,6 @@ function chunkText(s: string, maxLen = 3500) {
   return out;
 }
 
-// Safe chunking for Telegram HTML messages: tries to split on newline boundaries
-// to avoid cutting HTML tags like <b> or <code>.
-function chunkTextByNewline(s: string, maxLen = 3800) {
-  const lines = s.split("\n");
-  const pages: string[] = [];
-  let buf = "";
-
-  const pushBuf = () => {
-    const t = buf.trimEnd();
-    if (t) pages.push(t);
-    buf = "";
-  };
-
-  for (const line of lines) {
-    const candidate = buf ? `${buf}\n${line}` : line;
-    if (candidate.length > maxLen) {
-      if (buf) pushBuf();
-      // If a single line is too large, fall back to hard slicing.
-      if (line.length > maxLen) {
-        const sliced = chunkText(line, maxLen);
-        pages.push(...sliced);
-      } else {
-        buf = line;
-      }
-    } else {
-      buf = candidate;
-    }
-  }
-
-  if (buf) pushBuf();
-  return pages.length ? pages : [s];
-}
-
-function buildAllPages(stored: Stored, maxLen = 3800) {
-  // Use the existing buildAll formatting, but split into safe pages for inline navigation.
-  return chunkTextByNewline(buildAll(stored), maxLen);
-}
-
-function buildPricesPageText(pageText: string, pageIndex: number, totalPages: number) {
-  const pageLabel = `صفحه ${pageIndex + 1} از ${totalPages}`;
-  return `📈 <b>لیست کامل قیمت‌ها</b>\n<i>${pageLabel}</i>\n\n${pageText}`;
-}
-
-function buildPricesKeyboard(pageIndex: number, totalPages: number) {
-  const row: any[] = [];
-  if (pageIndex > 0) row.push({ text: "⬅️ قبلی", callback_data: `prices_page:${pageIndex - 1}` });
-  row.push({ text: "🏠 خانه", callback_data: "start_menu" });
-  if (pageIndex < totalPages - 1) row.push({ text: "بعدی ➡️", callback_data: `prices_page:${pageIndex + 1}` });
-
-  return {
-    inline_keyboard: [
-      row,
-      [{ text: `📄 ${pageIndex + 1}/${totalPages}`, callback_data: "prices_info" }]
-    ]
-  };
-}
-
 async function getStoredOrRefresh(env: Env, ctx: ExecutionContext): Promise<Stored> {
   const txt = await env.BOT_KV.get(KEY_RATES);
   if (txt) {
@@ -592,6 +535,176 @@ function buildAll(stored: Stored) {
   return lines.join("\n");
 }
 
+
+const PRICE_PAGE_SIZE = 8;
+
+type PriceCategory = "fiat" | "crypto";
+type PriceListItem = { code: string; text: string; category: PriceCategory };
+
+function getUpdateTimeStr(stored: Stored) {
+  // Keep the original time behavior (IR time) used in buildAll()
+  const date = new Date(stored.fetchedAtMs + (3.5 * 3600000));
+  return date.toISOString().substr(11, 5);
+}
+
+function clampPage(page: number, totalPages: number) {
+  if (!Number.isFinite(page) || page < 0) return 0;
+  if (page >= totalPages) return Math.max(0, totalPages - 1);
+  return page;
+}
+
+function shortButtonText(s: string, max = 60) {
+  if (s.length <= max) return s;
+  return s.slice(0, max - 1) + "…";
+}
+
+function buildPriceItems(stored: Stored, category: PriceCategory): PriceListItem[] {
+  const rates = stored.rates;
+  const codes = Object.keys(rates);
+
+  const priority = ["usd", "eur", "aed", "try", "afn", "iqd", "gbp"];
+  const cryptoPriority = ["btc", "eth", "ton", "usdt", "trx", "not", "doge", "sol"];
+
+  if (category === "crypto") {
+    const cryptoCodes = codes.filter((c) => rates[c]?.kind === "crypto");
+    cryptoCodes.sort((a, b) => {
+      const idxA = cryptoPriority.indexOf(a), idxB = cryptoPriority.indexOf(b);
+      if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+      if (idxA !== -1) return -1;
+      if (idxB !== -1) return 1;
+      return a.localeCompare(b);
+    });
+
+    const items: PriceListItem[] = [];
+    for (const c of cryptoCodes) {
+      const r = rates[c];
+      const per1 = Math.round(r.price / (r.unit || 1));
+      const toman = formatToman(per1);
+      const change = r.change24h ?? 0;
+      const changeEmoji = change >= 0 ? "🟢" : "🔴";
+      const changeStr = Math.abs(change).toFixed(1) + "%";
+      const txt = shortButtonText(`💎 ${c.toUpperCase()}: ${toman}ت ${changeEmoji}${changeStr}`);
+      items.push({ code: c, category, text: txt });
+    }
+    return items;
+  }
+
+  // fiat + gold
+  const goldCodes: string[] = [];
+  const currencyCodes: string[] = [];
+
+  for (const c of codes) {
+    const r = rates[c];
+    if (!r || r.kind === "crypto") continue;
+    if (r.kind === "gold" || c.includes("coin") || c.includes("gold")) goldCodes.push(c);
+    else currencyCodes.push(c);
+  }
+
+  goldCodes.sort((a, b) => a.localeCompare(b));
+  currencyCodes.sort((a, b) => {
+    const idxA = priority.indexOf(a), idxB = priority.indexOf(b);
+    if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+    if (idxA !== -1) return -1;
+    if (idxB !== -1) return 1;
+    return a.localeCompare(b);
+  });
+
+  const merged = [...goldCodes, ...currencyCodes];
+
+  const items: PriceListItem[] = [];
+  for (const c of merged) {
+    const r = rates[c];
+    const per1 = Math.round(r.price / (r.unit || 1));
+    const priceStr = formatToman(per1);
+    const meta = META[c] ?? { emoji: "💱", fa: (r.title || r.fa || c.toUpperCase()) };
+    const txt = shortButtonText(`${meta.emoji} ${meta.fa}: ${priceStr}ت`);
+    items.push({ code: c, category, text: txt });
+  }
+  return items;
+}
+
+function buildPricesKeyboard(category: PriceCategory, page: number, totalPages: number, items: PriceListItem[]) {
+  const start = page * PRICE_PAGE_SIZE;
+  const slice = items.slice(start, start + PRICE_PAGE_SIZE);
+
+  const rows = slice.map((it) => {
+    return [{ text: it.text, callback_data: `show:${category}:${it.code}:${page}` }];
+  });
+
+  const prevCb = page > 0 ? `page:${category}:${page - 1}` : "noop";
+  const nextCb = page + 1 < totalPages ? `page:${category}:${page + 1}` : "noop";
+
+  rows.push([
+    { text: "⬅️ قبلی", callback_data: prevCb },
+    { text: "🏠 خانه", callback_data: "start_menu" },
+    { text: "بعدی ➡️", callback_data: nextCb }
+  ]);
+
+  return { inline_keyboard: rows };
+}
+
+function buildCategoryHeaderText(category: PriceCategory, page: number, totalPages: number, timeStr: string) {
+  if (category === "crypto") {
+    return [
+      "🪙 <b>قیمت ارز دیجیتال</b>",
+      `📄 صفحه ${page + 1}/${totalPages}`,
+      `🕐 <b>بروزرسانی:</b> ${timeStr}`,
+      "",
+      "👇 قیمت‌ها روی دکمه‌هاست:"
+    ].join("\n");
+  }
+  return [
+    "💱 <b>قیمت ارز و طلا</b>",
+    `📄 صفحه ${page + 1}/${totalPages}`,
+    `🕐 <b>بروزرسانی:</b> ${timeStr}`,
+    "",
+    "👇 قیمت‌ها روی دکمه‌هاست:"
+  ].join("\n");
+}
+
+function buildPriceDetailText(stored: Stored, category: PriceCategory, code: string) {
+  const r = stored.rates?.[code];
+  if (!r) return "❗️این آیتم پیدا نشد.";
+  const per1 = Math.round(r.price / (r.unit || 1));
+  const toman = formatToman(per1);
+
+  if (category === "crypto") {
+    const usdP = r.usdPrice != null ? formatUSD(r.usdPrice) : "?";
+    const change = r.change24h ?? 0;
+    const changeEmoji = change >= 0 ? "🟢" : "🔴";
+    const changeStr = Math.abs(change).toFixed(2) + "%";
+
+    return [
+      `💎 <b>${r.fa || code.toUpperCase()}</b> (${code.toUpperCase()})`,
+      `💶 قیمت: <code>${toman}</code> تومان`,
+      `💵 قیمت دلاری: <code>${usdP}</code> $`,
+      `📈 تغییر 24ساعته: ${changeEmoji} <b>${changeStr}</b>`,
+      "",
+      `🕐 <b>بروزرسانی:</b> ${getUpdateTimeStr(stored)}`
+    ].join("\n");
+  }
+
+  const meta = META[code] ?? { emoji: "💱", fa: (r.title || r.fa || code.toUpperCase()) };
+  return [
+    `${meta.emoji} <b>${meta.fa}</b>`,
+    `💶 قیمت: <code>${toman}</code> تومان`,
+    r.unit && r.unit !== 1 ? `📦 واحد: <code>${r.unit}</code>` : "",
+    "",
+    `🕐 <b>بروزرسانی:</b> ${getUpdateTimeStr(stored)}`
+  ].filter(Boolean).join("\n");
+}
+
+function buildDetailKeyboard(category: PriceCategory, page: number) {
+  return {
+    inline_keyboard: [
+      [
+        { text: "🔙 بازگشت", callback_data: `page:${category}:${page}` },
+        { text: "🏠 خانه", callback_data: "start_menu" }
+      ]
+    ]
+  };
+}
+
 function replyCurrency(r: Rate, amount: number) {
   const per1 = r.price / (r.unit || 1);
   const total = per1 * amount;
@@ -629,7 +742,10 @@ const START_KEYBOARD = {
       { text: "📘 راهنما", callback_data: "help_menu" }
     ],
     [
-      { text: "📈 لیست کامل قیمت‌ها", callback_data: "get_all_prices" }
+      { text: "💱 قیمت ارز و طلا", callback_data: "cat:fiat" }
+    ],
+    [
+      { text: "🪙 قیمت ارز دیجیتال", callback_data: "cat:crypto" }
     ]
   ]
 };
@@ -691,31 +807,53 @@ export default {
         await tgEditMessage(env, chatId, messageId, getHelpMessage(), HELP_KEYBOARD);
       } else if (data === "start_menu") {
         await tgEditMessage(env, chatId, messageId, "👋 سلام! به ربات خوش آمدید.\nچه کاری می‌توانم برایتان انجام دهم؟", START_KEYBOARD);
-      } else if (data === "get_all_prices") {
-        await tgAnswerCallback(env, cb.id, "در حال دریافت لیست...");
-        const stored = await getStoredOrRefresh(env, ctx);
-        const pages = buildAllPages(stored, 3800);
-        const pageIndex = 0;
-        const pageText = buildPricesPageText(pages[pageIndex] || "", pageIndex, pages.length);
-        await tgEditMessage(env, chatId, messageId, pageText, buildPricesKeyboard(pageIndex, pages.length));
-        return new Response("ok");
-      } else if (typeof data === "string" && data.startsWith("prices_page:")) {
+      } else if (data === "noop") {
         await tgAnswerCallback(env, cb.id);
-        const nStr = data.split(":")[1] || "0";
-        const requested = Number(nStr);
-        const stored = await getStoredOrRefresh(env, ctx);
-        const pages = buildAllPages(stored, 3800);
-        const max = Math.max(0, pages.length - 1);
-        const pageIndex = Number.isFinite(requested) ? Math.min(Math.max(0, requested), max) : 0;
-        const pageText = buildPricesPageText(pages[pageIndex] || "", pageIndex, pages.length);
-        await tgEditMessage(env, chatId, messageId, pageText, buildPricesKeyboard(pageIndex, pages.length));
         return new Response("ok");
-      } else if (data === "prices_info") {
-        // Just close the spinner / show a tiny hint.
-        await tgAnswerCallback(env, cb.id, "برای دیدن بقیه صفحات از دکمه‌های قبلی/بعدی استفاده کن.");
+      } else if (data?.startsWith("cat:")) {
+        const category = (data.split(":")[1] as any) as PriceCategory;
+        await tgAnswerCallback(env, cb.id, "در حال دریافت قیمت‌ها...");
+        const stored = await getStoredOrRefresh(env, ctx);
+        const items = buildPriceItems(stored, category);
+        const totalPages = Math.max(1, Math.ceil(items.length / PRICE_PAGE_SIZE));
+        const page = 0;
+        const timeStr = getUpdateTimeStr(stored);
+        const text = buildCategoryHeaderText(category, page, totalPages, timeStr);
+        const kb = buildPricesKeyboard(category, page, totalPages, items);
+        await tgEditMessage(env, chatId, messageId, text, kb);
+        return new Response("ok");
+      } else if (data?.startsWith("page:")) {
+        const parts = data.split(":");
+        const category = (parts[1] as any) as PriceCategory;
+        const pageReq = parseInt(parts[2] || "0", 10) || 0;
+        await tgAnswerCallback(env, cb.id);
+        const stored = await getStoredOrRefresh(env, ctx);
+        const items = buildPriceItems(stored, category);
+        const totalPages = Math.max(1, Math.ceil(items.length / PRICE_PAGE_SIZE));
+        const page = clampPage(pageReq, totalPages);
+        const timeStr = getUpdateTimeStr(stored);
+        const text = buildCategoryHeaderText(category, page, totalPages, timeStr);
+        const kb = buildPricesKeyboard(category, page, totalPages, items);
+        await tgEditMessage(env, chatId, messageId, text, kb);
+        return new Response("ok");
+      } else if (data?.startsWith("show:")) {
+        const parts = data.split(":");
+        const category = (parts[1] as any) as PriceCategory;
+        const code = (parts[2] || "").toLowerCase();
+        const page = parseInt(parts[3] || "0", 10) || 0;
+        await tgAnswerCallback(env, cb.id);
+        const stored = await getStoredOrRefresh(env, ctx);
+        const text = buildPriceDetailText(stored, category, code);
+        const kb = buildDetailKeyboard(category, page);
+        await tgEditMessage(env, chatId, messageId, text, kb);
+        return new Response("ok");
+      } else if (data === "get_all_prices") {
+        // Backward-compat (older buttons): show category selector
+        await tgAnswerCallback(env, cb.id);
+        await tgEditMessage(env, chatId, messageId, "📌 یک دسته‌بندی را انتخاب کنید:", START_KEYBOARD);
         return new Response("ok");
       }
-      
+
       await tgAnswerCallback(env, cb.id);
       return new Response("ok");
     }
