@@ -17,7 +17,7 @@ const COBALT_INSTANCES = [
   "https://cobalt-api.kwiatekmiki.com",
   "https://downloadapi.stuff.solutions",
   "https://co.wuk.sh/api/json",
-  "https://cobalt.canine.tools/",
+  "https://cobalt.canine.tools",
   "https://api.cobalt.tools",
   "https://blossom.imput.net",
   "https://kityune.imput.net",
