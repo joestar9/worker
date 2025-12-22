@@ -88,25 +88,82 @@ const META: Record<string, { emoji: string; fa: string }> = {
   coin_gram: { emoji: "🌑", fa: "سکه گرمی" }
 };
 
+// Aliases are used to understand user messages (Persian/English, common typos, country names, etc.)
+// IMPORTANT: keys are matched after normalization + punctuation removal + whitespace removal.
 const ALIASES: Array<{ keys: string[]; code: string }> = [
-  { keys: ["دلار", "usd", "تتر", "tether", "usdt"], code: "usd" },
-  { keys: ["یورو", "eur"], code: "eur" },
-  { keys: ["پوند", "gbp"], code: "gbp" },
-  { keys: ["درهم", "aed"], code: "aed" },
-  { keys: ["لیر", "try"], code: "try" },
-  { keys: ["افغانی", "afn"], code: "afn" },
-  { keys: ["طلا", "gold", "گرم طلا", "طلای ۱۸", "طلای18"], code: "gold_gram_18k" },
-  { keys: ["مثقال", "mithqal"], code: "gold_mithqal" },
-  { keys: ["سکه", "coin", "امامی"], code: "coin_emami" },
-  { keys: ["بیت", "بیتکوین", "btc", "bitcoin"], code: "btc" },
+  // Major fiats
+  { keys: ["دلار", "دلارامریکا", "دلارآمریکا", "دلار امریکا", "usd", "us dollar", "dollar"], code: "usd" },
+  { keys: ["یورو", "eur", "euro"], code: "eur" },
+  { keys: ["پوند", "پوندانگلیس", "پوند انگلیس", "gbp", "britishpound"], code: "gbp" },
+  { keys: ["فرانک", "فرانکسوئیس", "فرانک سوئیس", "chf", "swissfranc"], code: "chf" },
+  { keys: ["دلارکانادا", "دلار کانادا", "دلارکاندا", "دلار کاندا", "کانادا", "کاندایی", "cad", "canadiandollar"], code: "cad" },
+  { keys: ["دلاراسترالیا", "دلار استرالیا", "استرالیا", "aud", "australiandollar"], code: "aud" },
+  { keys: ["درهم", "درهمامارات", "درهم امارات", "امارات", "aed", "uaedirham"], code: "aed" },
+  { keys: ["لیر", "لیرترکیه", "لیر ترکیه", "ترکیه", "try", "turkishlira"], code: "try" },
+  { keys: ["ین", "ینژاپن", "ین ژاپن", "ژاپن", "jpy", "japaneseyen"], code: "jpy" },
+  { keys: ["یوان", "یوانچین", "یوان چین", "چین", "cny", "chineseyuan"], code: "cny" },
+  { keys: ["ریال عربستان", "ریالعربستان", "ریاض", "عربستان", "sar", "ksa", "saudiriyal"], code: "sar" },
+  { keys: ["افغانی", "افغان", "afn", "afghanafghani"], code: "afn" },
+  { keys: ["ریال عمان", "عمان", "omr", "omanirial"], code: "omr" },
+  { keys: ["ریال قطر", "قطر", "qar", "qataririyal"], code: "qar" },
+  { keys: ["دینارکویت", "دینار کویت", "کویت", "kwd", "kuwaitidinar"], code: "kwd" },
+  { keys: ["دیناربحرین", "دینار بحرین", "بحرین", "bhd", "bahrainidinar"], code: "bhd" },
+  { keys: ["دینارعراق", "دینار عراق", "عراق", "عراقی", "iqd", "iraqidinar"], code: "iqd" },
+  { keys: ["کرونسوئد", "کرون سوئد", "سوئد", "sek", "swedishkrona"], code: "sek" },
+  { keys: ["کروننروژ", "کرون نروژ", "نروژ", "nok", "norwegiankrone"], code: "nok" },
+  { keys: ["کرون دانمارک", "دانمارک", "dkk", "danishkrone"], code: "dkk" },
+  { keys: ["روبل", "روبل روسیه", "روسیه", "rub", "russianruble"], code: "rub" },
+  { keys: ["بات", "بات تایلند", "تایلند", "thb", "thaibaht"], code: "thb" },
+  { keys: ["دلار سنگاپور", "سنگاپور", "sgd", "singaporedollar"], code: "sgd" },
+  { keys: ["دلار هنگ کنگ", "هنگکنگ", "hkd", "hongkongdollar"], code: "hkd" },
+  { keys: ["منات", "منات آذربایجان", "آذربایجان", "azn", "azerbaijanimanat"], code: "azn" },
+  { keys: ["درام", "درام ارمنستان", "ارمنستان", "amd", "armeniandram"], code: "amd" },
+  { keys: ["رینگیت", "مالزی", "myr", "ringgit"], code: "myr" },
+  { keys: ["روپیه هند", "هند", "inr", "indianrupee"], code: "inr" },
+
+  // Gold & coins
+  { keys: ["طلا", "gold", "گرم طلا", "گرمطلای18", "طلای18", "طلای ۱۸", "۱۸"], code: "gold_gram_18k" },
+  { keys: ["مثقال", "مثقالطلا", "mithqal"], code: "gold_mithqal" },
+  { keys: ["اونس", "انس", "اونس طلا", "goldounce", "ounce"], code: "gold_ounce" },
+  { keys: ["سکه", "coin", "سکه امامی", "امامی", "coin_emami"], code: "coin_emami" },
+  { keys: ["بهار", "بهار آزادی", "ازادی", "آزادی", "coin_azadi"], code: "coin_azadi" },
+  { keys: ["نیم سکه", "نیم", "½", "coin_half_azadi"], code: "coin_half_azadi" },
+  { keys: ["ربع سکه", "ربع", "¼", "coin_quarter_azadi"], code: "coin_quarter_azadi" },
+  { keys: ["گرمی", "سکه گرمی", "coin_gerami"], code: "coin_gerami" },
+
+  // Crypto (common)
+  { keys: ["بیت", "بیتکوین", "بیت کوین", "btc", "bitcoin"], code: "btc" },
   { keys: ["اتریوم", "eth", "ethereum"], code: "eth" },
-  { keys: ["نات", "ناتکوین", "not", "notcoin"], code: "not" },
-  { keys: ["تون", "ton", "toncoin"], code: "ton" },
-  { keys: ["دوج", "doge", "dogecoin"], code: "doge" },
-  { keys: ["شیبا", "shib", "shiba"], code: "shib" },
+  { keys: ["تتر", "usdt", "tether", "tetherusdt"], code: "usdt" },
+  { keys: ["بی ان بی", "bnb", "binance"], code: "bnb" },
+  { keys: ["ریپل", "xrp"], code: "xrp" },
+  { keys: ["یو اس دی سی", "usdc"], code: "usdc" },
+  { keys: ["سولانا", "sol", "solana"], code: "sol" },
   { keys: ["ترون", "trx", "tron"], code: "trx" },
-  { keys: ["سولانا", "sol", "solana"], code: "sol" }
+  { keys: ["دوج", "دوج کوین", "doge", "dogecoin"], code: "doge" },
+  { keys: ["شیبا", "shib", "shiba"], code: "shib" },
+  { keys: ["پولکادات", "dot", "polkadot"], code: "dot" },
+  { keys: ["فایل کوین", "fil", "filecoin"], code: "fil" },
+  { keys: ["تون", "ton", "toncoin"], code: "ton" },
+  { keys: ["چین لینک", "link", "chainlink"], code: "link" },
+  { keys: ["مونرو", "xmr", "monero"], code: "xmr" },
+  { keys: ["بیت کوین کش", "bch", "bitcoincash"], code: "bch" }
 ];
+
+// Precompiled alias index (fast matching)
+const ALIAS_INDEX: Array<{ code: string; key: string }> = (() => {
+  const out: Array<{ code: string; key: string }> = [];
+  for (const a of ALIASES) {
+    for (const k of a.keys) {
+      const nk = stripPunct(norm(String(k))).replace(/\s+/g, "").trim();
+      if (!nk) continue;
+      out.push({ code: a.code, key: nk });
+    }
+  }
+  // Longer keys first (more specific)
+  out.sort((x, y) => y.key.length - x.key.length);
+  return out;
+})();
 
 function normalizeDigits(input: string) {
   const map: Record<string, string> = {
@@ -128,6 +185,14 @@ function norm(input: string) {
 function stripPunct(input: string) {
   return input.replace(/[.,!?؟؛:()[\]{}"'«»]/g, " ").replace(/\s+/g, " ").trim();
 }
+
+// Pre-normalize alias keys to make matching reliable even with spaces/punctuation/Arabic letters.
+const ALIAS_INDEX: Array<{ code: string; keys: string[] }> = ALIASES.map((a) => ({
+  code: a.code,
+  keys: a.keys
+    .map((k) => stripPunct(norm(k)).replace(/\s+/g, " ").trim().replace(/\s+/g, ""))
+    .filter(Boolean)
+}));
 
 function formatToman(n: number) {
   const x = Math.round(n);
@@ -387,40 +452,120 @@ async function refreshRates(env: Env) {
   return { ok: true, changed, count: Object.keys(stored.rates).length };
 }
 
-function parsePersianNumberUpTo100(tokens: string[]): number | null {
-  const ones: Record<string, number> = { "یک":1,"یه":1,"دو":2,"سه":3,"چهار":4,"پنج":5,"شش":6,"شیش":6,"هفت":7,"هشت":8,"نه":9 };
-  const teens: Record<string, number> = { "ده":10,"یازده":11,"دوازده":12,"سیزده":13,"چهارده":14,"پانزده":15,"شانزده":16,"هفده":17,"هجده":18,"نوزده":19 };
-  const tens: Record<string, number> = { "بیست":20,"سی":30,"چهل":40,"پنجاه":50,"شصت":60,"هفتاد":70,"هشتاد":80,"نود":90 };
-  const t = tokens.filter(x => x && x !== "و");
+function parsePersianNumber(tokens: string[]): number | null {
+  // Supports phrases like:
+  // «دویست میلیون», «دویست هزار», «یک میلیارد و دویست میلیون», «سی و پنج هزار» ...
+  const ones: Record<string, number> = {
+    "یک": 1, "یه": 1, "دو": 2, "سه": 3, "چهار": 4, "پنج": 5, "شش": 6, "شیش": 6, "هفت": 7, "هشت": 8, "نه": 9
+  };
+  const teens: Record<string, number> = {
+    "ده": 10, "یازده": 11, "دوازده": 12, "سیزده": 13, "چهارده": 14, "پانزده": 15, "شانزده": 16, "هفده": 17, "هجده": 18, "نوزده": 19
+  };
+  const tens: Record<string, number> = {
+    "بیست": 20, "سی": 30, "چهل": 40, "پنجاه": 50, "شصت": 60, "هفتاد": 70, "هشتاد": 80, "نود": 90
+  };
+  const hundreds: Record<string, number> = {
+    "صد": 100, "یکصد": 100,
+    "دویست": 200, "سیصد": 300, "چهارصد": 400, "پانصد": 500,
+    "ششصد": 600, "شیشصد": 600, "هفتصد": 700, "هشتصد": 800, "نهصد": 900
+  };
+  const scales: Record<string, number> = {
+    "هزار": 1e3,
+    "میلیون": 1e6,
+    "ملیون": 1e6,
+    "میلیارد": 1e9,
+    "بیلیون": 1e9,
+    "تریلیون": 1e12
+  };
+
+  const t = tokens
+    .map((x) => x.trim())
+    .filter((x) => x && x !== "و");
   if (t.length === 0) return null;
-  const joined = t.join("").replace(/\s+/g, "");
-  if (joined === "یکصد" || t.join(" ") === "یک صد" || t[0] === "صد") return 100;
-  if (t.length === 1) {
-    if (teens[t[0]] != null) return teens[t[0]];
-    if (tens[t[0]] != null) return tens[t[0]];
-    if (ones[t[0]] != null) return ones[t[0]];
-  }
-  if (t.length === 2) {
-    const a = t[0], b = t[1];
-    if (tens[a] != null && ones[b] != null) return tens[a] + ones[b];
-  }
+
   let total = 0;
+  let current = 0;
+
+  const addSmall = (w: string) => {
+    if (hundreds[w] != null) {
+      current += hundreds[w];
+      return true;
+    }
+    if (teens[w] != null) {
+      current += teens[w];
+      return true;
+    }
+    if (tens[w] != null) {
+      current += tens[w];
+      return true;
+    }
+    if (ones[w] != null) {
+      current += ones[w];
+      return true;
+    }
+    if (w === "صد") {
+      current = (current || 1) * 100;
+      return true;
+    }
+    return false;
+  };
+
   for (const w of t) {
-    if (teens[w] != null) return teens[w];
-    if (tens[w] != null) total += tens[w];
-    else if (ones[w] != null) total += ones[w];
-    else return null;
+    if (scales[w] != null) {
+      const scale = scales[w];
+      const base = current || 1;
+      total += base * scale;
+      current = 0;
+      continue;
+    }
+    if (!addSmall(w)) {
+      // Unknown word
+      return null;
+    }
   }
-  if (total >= 1 && total <= 100) return total;
-  return null;
+
+  total += current;
+  return total > 0 ? total : null;
+}
+
+function parseDigitsWithScale(text: string): number | null {
+  // Examples:
+  // 200 میلیون
+  // ۲۰۰میلیون
+  // 200,000
+  // 200k
+  const t = normalizeDigits(text);
+  const m = t.match(/(\d+(?:\.\d+)?)(?:\s*(هزار|میلیون|ملیون|میلیارد|بیلیون|تریلیون|k|m|b))?/i);
+  if (!m) return null;
+  const num = Number(m[1]);
+  if (!Number.isFinite(num) || num <= 0) return null;
+  const suf = (m[2] || "").toLowerCase();
+  const mul = suf === "هزار" || suf === "k" ? 1e3
+    : (suf === "میلیون" || suf === "ملیون" || suf === "m") ? 1e6
+    : (suf === "میلیارد" || suf === "بیلیون" || suf === "b") ? 1e9
+    : suf === "تریلیون" ? 1e12
+    : 1;
+  return num * mul;
 }
 
 function findCode(textNorm: string, rates: Record<string, Rate>) {
   const cleaned = stripPunct(textNorm).replace(/\s+/g, " ").trim();
   const compact = cleaned.replace(/\s+/g, "");
-  
-  const aliasMatch = ALIASES.find(a => a.keys.some(k => compact.includes(k)));
-  if (aliasMatch) return aliasMatch.code;
+
+  // 1) Alias index (normalized)
+  for (const a of ALIAS_INDEX) {
+    for (const k of a.keys) {
+      if (k && compact.includes(k)) return a.code;
+    }
+  }
+
+  // 2) Some high-value composed patterns (helps with typos like «دلار کاندا»)
+  if (compact.includes("دلار") && (compact.includes("کانادا") || compact.includes("کاندا") || compact.includes("کاندایی"))) {
+    if (rates["cad"]) return "cad";
+  }
+  if (compact.includes("دینار") && (compact.includes("عراق") || compact.includes("عراقی"))) {
+    if (rates["iqd"]) return "iqd";
+  }
 
   const m = cleaned.match(/\b([a-z]{3,10})\b/i);
   if (m) {
@@ -437,19 +582,21 @@ function findCode(textNorm: string, rates: Record<string, Rate>) {
 
 function extractAmount(textNorm: string) {
   const cleaned = stripPunct(textNorm).replace(/\s+/g, " ").trim();
-  const numMatch = cleaned.match(/(\d+(?:\.\d+)?)/);
-  if (numMatch) {
-    const n = Number(numMatch[1]);
-    if (Number.isFinite(n) && n > 0) return n;
-  }
+  // 1) Digits (with optional scale word)
+  const digitScaled = parseDigitsWithScale(cleaned);
+  if (digitScaled != null && digitScaled > 0) return digitScaled;
+
+  // 2) Persian words (with هزار/میلیون/میلیارد...)
   const tokens = cleaned.split(" ").filter(Boolean);
-  const win = tokens.slice(-7);
-  for (let i = 0; i < win.length; i++) {
-    for (let j = win.length; j > i; j--) {
-      const n = parsePersianNumberUpTo100(win.slice(i, j));
+  // Try all windows (up to 10 tokens) to find a valid number phrase.
+  const maxWin = Math.min(tokens.length, 10);
+  for (let w = maxWin; w >= 1; w--) {
+    for (let i = 0; i + w <= tokens.length; i++) {
+      const n = parsePersianNumber(tokens.slice(i, i + w));
       if (n != null && n > 0) return n;
     }
   }
+
   return 1;
 }
 
@@ -775,20 +922,12 @@ function buildPricesKeyboard(category: PriceCategory, page: number, totalPages: 
 
   const rows: Array<Array<{ text: string; callback_data: string }>> = [];
 
-  // Header row (3 columns)
-  const headerRight = category === "crypto" ? "🪙 نام" : "💱 نام";
-  rows.push([
-    { text: "✨", callback_data: "noop" },
-    { text: "💰 قیمت", callback_data: "noop" },
-    { text: headerRight, callback_data: "noop" }
-  ]);
-
+  // Two-column glass style: (emoji + name) | (price)
   for (const it of slice) {
     const cb = `show:${category}:${it.code}:${page}`;
     rows.push([
-      { text: it.emoji, callback_data: cb },
-      { text: it.price, callback_data: cb },
-      { text: it.name, callback_data: cb }
+      { text: `${it.emoji} ${it.name}`, callback_data: cb },
+      { text: it.price, callback_data: cb }
     ]);
   }
 
@@ -1000,11 +1139,11 @@ export default {
         const category = (parts[1] as any) as PriceCategory;
         const code = (parts[2] || "").toLowerCase();
         const page = parseInt(parts[3] || "0", 10) || 0;
-        await tgAnswerCallback(env, cb.id);
+        await tgAnswerCallback(env, cb.id, "📩 ارسال شد");
         const stored = await getStoredOrRefresh(env, ctx);
         const text = buildPriceDetailText(stored, category, code);
-        const kb = buildDetailKeyboard(category, page);
-        await tgEditMessage(env, chatId, messageId, text, kb);
+        // Send as a separate message (requested behavior)
+        await tgSend(env, chatId, text);
         return new Response("ok");
       } else if (data === "get_all_prices") {
         await tgAnswerCallback(env, cb.id);
