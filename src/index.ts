@@ -7,7 +7,21 @@ export interface Env {
 
 // --- CONFIGURATION ---
 const PRICES_URL = "https://raw.githubusercontent.com/joestar9/jojo/refs/heads/main/prices.json";
-const COBALT_API = "https://api.cobalt.tools/api/json"; // سرویس رایگان برای استخراج لینک
+
+const COBALT_INSTANCES = [
+  // Community Instances (معمولاً محدودیت کمتری دارند و سریع‌ترند)
+  "https://cobalt-api.meowing.de",           // v10
+  "https://cobalt-backend.canine.tools",     // v10
+  "https://capi.3kh0.net",                   // v10
+  "https://cobalt-api.kwiatekmiki.com",      // v10
+  "https://downloadapi.stuff.solutions",     // v10
+  "https://co.wuk.sh/api/json",              // Old reliable (v7/v10 hybrid)
+  "https://nachos.imput.net",
+  "https://sunny.imput.net",
+  "https://blossom.imput.net",
+  "https://kityune.imput.net",
+];
+
 const KEY_RATES = "rates:latest";
 const KEY_ETAG = "rates:etag";
 const KEY_HASH = "rates:hash";
@@ -285,7 +299,6 @@ async function tgSend(env: Env, chatId: number, text: string, replyTo?: number) 
 
 async function tgSendVideo(env: Env, chatId: number, videoUrl: string, caption: string, replyTo?: number) {
   const url = `https://api.telegram.org/bot${env.TG_TOKEN}/sendVideo`;
-  // نکته مهم: اینجا ما لینک مستقیم را به جای فایل می‌فرستیم (URL Upload)
   const body: any = { 
     chat_id: chatId, 
     video: videoUrl, 
@@ -295,65 +308,110 @@ async function tgSendVideo(env: Env, chatId: number, videoUrl: string, caption: 
   if (replyTo) { body.reply_to_message_id = replyTo; body.allow_sending_without_reply = true; }
   
   const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-  if (!res.ok) {
-     const err = await res.text();
-     console.error("TG Video Error:", err);
-     throw new Error("Telegram API Error");
-  }
+  if (!res.ok) console.error("TG Video Error:", await res.text());
 }
 
-// --- INSTAGRAM HANDLER ---
+async function tgSendPhoto(env: Env, chatId: number, photoUrl: string, caption: string, replyTo?: number) {
+    const url = `https://api.telegram.org/bot${env.TG_TOKEN}/sendPhoto`;
+    const body: any = { 
+      chat_id: chatId, 
+      photo: photoUrl, 
+      caption: caption, 
+      parse_mode: "HTML"
+    };
+    if (replyTo) { body.reply_to_message_id = replyTo; body.allow_sending_without_reply = true; }
+    await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(() => {});
+}
+
+// --- COBALT API HANDLER (ROBUST MULTI-SERVER) ---
 async function handleInstagram(env: Env, chatId: number, text: string, replyTo?: number) {
-  // 1. پیدا کردن لینک اینستاگرام در متن
   const urlMatch = text.match(/(https?:\/\/(?:www\.)?instagram\.com\/[^\s]+)/);
   if (!urlMatch) return false;
 
   const targetUrl = urlMatch[1];
   
-  try {
-    // ارسال وضعیت "در حال آپلود"
-    await fetch(`https://api.telegram.org/bot${env.TG_TOKEN}/sendChatAction`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ chat_id: chatId, action: "upload_video" })
-    });
+  await fetch(`https://api.telegram.org/bot${env.TG_TOKEN}/sendChatAction`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, action: "upload_video" })
+  });
 
-    // 2. درخواست به Cobalt API برای دریافت لینک مستقیم
-    const apiRes = await fetch(COBALT_API, {
-      method: "POST",
-      headers: { 
-        "Accept": "application/json",
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({ 
-        url: targetUrl,
-        vCodec: "h264" // برای سازگاری بهتر با تلگرام
-      })
-    });
+  let lastError = "";
 
-    if (!apiRes.ok) throw new Error("API Error");
-    
-    const data = await apiRes.json<any>();
-    
-    // cobalt ممکن است url یا گاهی اوقات picker برگرداند، ما فعلا ساده‌ترین حالت را در نظر می‌گیریم
-    // لینک مستقیم فایل (بدون نیاز به دانلود توسط ورکر)
-    let directLink = data.url; 
-    
-    if (!directLink && data.picker && data.picker.length > 0) {
-        directLink = data.picker[0].url;
-    }
+  for (const baseUrl of COBALT_INSTANCES) {
+      try {
+          // استراتژی هوشمند:
+          // برخی سرورها درخواست را در ریشه "/" می‌پذیرند (اکثر نسخه‌های جدید)
+          // برخی دیگر در "/json" یا "/api/json"
+          // برای اطمینان، ما هدرهای استاندارد JSON را می‌فرستیم که روی اکثر اینستنس‌ها کار می‌کند.
+          
+          // اگر URL با /json تمام نمی‌شود، ما فرض می‌کنیم Root API است.
+          const endpoint = baseUrl.endsWith("json") ? baseUrl : baseUrl; 
+          
+          const apiRes = await fetch(endpoint, {
+            method: "POST",
+            headers: { 
+              "Accept": "application/json",
+              "Content-Type": "application/json",
+              "User-Agent": "Mozilla/5.0 (compatible; TelegramBot/1.0)", // برای جلوگیری از مسدود شدن
+              "Origin": "https://cobalt.tools", // دور زدن برخی محدودیت‌های CORS/Referer
+              "Referer": "https://cobalt.tools/"
+            },
+            body: JSON.stringify({ 
+              url: targetUrl,
+              vCodec: "h264"
+            })
+          });
 
-    if (!directLink) throw new Error("No link found");
+          if (!apiRes.ok) {
+             // اگر 404 داد، شاید اندپوینت اشتباه است، سعی می‌کنیم /api/json را تست کنیم (فقط برای دامنه‌های اصلی)
+             if (apiRes.status === 404 && !baseUrl.includes("json")) {
+                 const retryUrl = baseUrl.endsWith("/") ? `${baseUrl}api/json` : `${baseUrl}/api/json`;
+                 const retryRes = await fetch(retryUrl, {
+                    method: "POST",
+                    headers: { "Accept": "application/json", "Content-Type": "application/json" },
+                    body: JSON.stringify({ url: targetUrl, vCodec: "h264" })
+                 });
+                 if (retryRes.ok) {
+                     // اگر دومی موفق بود، از آن استفاده کن
+                     const data = await retryRes.json<any>();
+                     await processCobaltResponse(env, chatId, data, replyTo);
+                     return true; 
+                 }
+             }
+             throw new Error(`HTTP ${apiRes.status}`);
+          }
+          
+          const data = await apiRes.json<any>();
+          await processCobaltResponse(env, chatId, data, replyTo);
+          return true; // موفقیت، خروج از حلقه
 
-    // 3. ارسال لینک به تلگرام (تلگرام خودش دانلود می‌کند)
-    await tgSendVideo(env, chatId, directLink, "✅ دانلود شد", replyTo);
-    return true;
-
-  } catch (e) {
-    console.error(e);
-    await tgSend(env, chatId, "❌ خطا در دانلود. ممکن است لینک خصوصی باشد یا API شلوغ باشد.", replyTo);
-    return true;
+      } catch (e: any) {
+          console.error(`Error on instance ${baseUrl}:`, e.message);
+          lastError = e.message;
+          // برو سرور بعدی...
+      }
   }
+
+  await tgSend(env, chatId, `❌ سرورهای دانلود پاسخگو نیستند. لطفاً دقایقی دیگر تلاش کنید.`, replyTo);
+  return true;
+}
+
+// تابع کمکی برای پردازش پاسخ JSON
+async function processCobaltResponse(env: Env, chatId: number, data: any, replyTo?: number) {
+    if (data.status === "error") throw new Error(data.text || "Cobalt Error");
+
+    if (data.status === "stream" || data.status === "redirect") {
+        await tgSendVideo(env, chatId, data.url, "✅ دانلود شد", replyTo);
+    } 
+    else if (data.status === "picker" && data.picker && data.picker.length > 0) {
+        const items = data.picker.slice(0, 4); 
+        for (const item of items) {
+            if (item.type === "video") await tgSendVideo(env, chatId, item.url, "", replyTo);
+            else if (item.type === "photo") await tgSendPhoto(env, chatId, item.url, "", replyTo);
+        }
+    } else {
+        throw new Error("Unknown response");
+    }
 }
 
 // --- MAIN LOGIC ---
@@ -418,7 +476,7 @@ function helpText() {
     "دلار",
     "100 دلار",
     "طلا",
-    "لینک اینستاگرام برای دانلود",
+    "لینک اینستاگرام (برای دانلود)",
     "",
     "/all",
     "/refresh <key>"
@@ -465,10 +523,10 @@ export default {
     const replyTo = isGroup ? messageId : undefined;
 
     const run = async () => {
-      // 1. بررسی لینک اینستاگرام (اولویت اول)
+      // 1. بررسی لینک اینستاگرام
       if (text.includes("instagram.com")) {
           const handled = await handleInstagram(env, chatId, text, replyTo);
-          if (handled) return; // اگر لینک اینستا بود و هندل شد، ادامه نده
+          if (handled) return; 
       }
 
       if (cmd === "/start" || cmd === "/help") { await tgSend(env, chatId, helpText(), replyTo); return; }
@@ -482,7 +540,6 @@ export default {
         return;
       }
 
-      // اگر دستور ارز بود
       const stored = await getStoredOrRefresh(env, ctx);
 
       if (cmd === "/all") {
@@ -498,11 +555,4 @@ export default {
       const r = stored.rates[code];
       if (!r) return;
 
-      const out = r.kind === "gold" ? replyGold(r, amount, stored) : replyCurrency(r, amount);
-      await tgSend(env, chatId, out, replyTo);
-    };
-
-    ctx.waitUntil(run());
-    return new Response("ok");
-  }
-};
+      const out
