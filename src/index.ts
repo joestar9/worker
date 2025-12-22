@@ -96,10 +96,7 @@ function normalizeDigits(input: string) {
     "٨": "8",
     "٩": "9"
   };
-  return input
-    .split("")
-    .map((ch) => map[ch] ?? ch)
-    .join("");
+  return input.split("").map((ch) => map[ch] ?? ch).join("");
 }
 
 function norm(input: string) {
@@ -129,9 +126,7 @@ async function sha256Hex(s: string) {
   const data = new TextEncoder().encode(s);
   const hash = await crypto.subtle.digest("SHA-256", data);
   const bytes = new Uint8Array(hash);
-  return Array.from(bytes)
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+  return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 function toNum(v: any): number | null {
@@ -269,9 +264,7 @@ function parsePersianNumberUpTo100(tokens: string[]): number | null {
 function findCode(textNorm: string) {
   const cleaned = stripPunct(textNorm).replace(/\s+/g, " ").trim();
   const compact = cleaned.replace(/\s+/g, "");
-  const keys = ALIASES
-    .flatMap((a) => a.keys.map((k) => ({ k: norm(k).replace(/\s+/g, ""), code: a.code })))
-    .sort((x, y) => y.k.length - x.k.length);
+  const keys = ALIASES.flatMap((a) => a.keys.map((k) => ({ k: norm(k).replace(/\s+/g, ""), code: a.code }))).sort((x, y) => y.k.length - x.k.length);
 
   for (const it of keys) {
     if (compact.includes(it.k)) return it.code;
@@ -309,6 +302,12 @@ function escapeHtml(s: string) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
+function cancelBody(res: Response | null | undefined) {
+  try {
+    res?.body?.cancel();
+  } catch {}
+}
+
 async function tgCall(env: Env, method: string, body: any) {
   const url = `https://api.telegram.org/bot${env.TG_TOKEN}/${method}`;
   const res = await fetch(url, {
@@ -318,6 +317,7 @@ async function tgCall(env: Env, method: string, body: any) {
   }).catch(() => null as any);
 
   const json = await res?.json?.().catch(() => null);
+  if (!json) cancelBody(res);
   return { resOk: !!res?.ok, tgOk: !!json?.ok, json };
 }
 
@@ -389,7 +389,6 @@ async function processCobaltResponse(env: Env, chatId: number, data: any, replyT
   const status = String(data?.status ?? "");
 
   if (status === "error") throw new Error(String(data?.text ?? "error"));
-
   if (status === "rate-limit") throw new Error("rate-limit");
 
   if (isDirectLike(status) && data?.url) {
@@ -428,7 +427,7 @@ async function handleCobalt(env: Env, chatId: number, text: string, replyTo?: nu
   let urlObj: URL;
   try {
     urlObj = new URL(finalUrl);
-  } catch (e) {
+  } catch {
     return false;
   }
 
@@ -442,11 +441,12 @@ async function handleCobalt(env: Env, chatId: number, text: string, replyTo?: nu
     finalUrl = urlObj.toString();
   }
 
-  await fetch(`https://api.telegram.org/bot${env.TG_TOKEN}/sendChatAction`, {
+  const actRes = await fetch(`https://api.telegram.org/bot${env.TG_TOKEN}/sendChatAction`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, action: "upload_video" })
-  }).catch(() => {});
+  }).catch(() => null as any);
+  cancelBody(actRes);
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 60000);
@@ -468,12 +468,12 @@ async function handleCobalt(env: Env, chatId: number, text: string, replyTo?: nu
 
       if (res.ok) {
         const data = await res.json<any>();
-        if (String(data?.status ?? "") === "rate-limit") {
-          continue;
-        }
+        if (String(data?.status ?? "") === "rate-limit") continue;
         clearTimeout(timeoutId);
         await processCobaltResponse(env, chatId, data, replyTo);
         return true;
+      } else {
+        cancelBody(res);
       }
 
       const res2 = await fetch(endpoint, {
@@ -485,14 +485,14 @@ async function handleCobalt(env: Env, chatId: number, text: string, replyTo?: nu
 
       if (res2.ok) {
         const data2 = await res2.json<any>();
-        if (String(data2?.status ?? "") === "rate-limit") {
-          continue;
-        }
+        if (String(data2?.status ?? "") === "rate-limit") continue;
         clearTimeout(timeoutId);
         await processCobaltResponse(env, chatId, data2, replyTo);
         return true;
+      } else {
+        cancelBody(res2);
       }
-    } catch (e: any) {}
+    } catch {}
   }
 
   clearTimeout(timeoutId);
