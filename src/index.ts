@@ -7,61 +7,62 @@ export interface Env {
 
 const BOT_USERNAME = "CHANGE_THIS_TO_YOUR_BOT_USERNAME";
 
-const PRICES_JSON_URL = "https://raw.githubusercontent.com/joestar9/price-scraper/refs/heads/main/prices.json";
-const CRYPTO_CSV_URL = "https://raw.githubusercontent.com/michaelvincentsebastian/Automated-Crypto-Market-Insights/refs/heads/main/latest-data/latest_data.csv";
+const PRICES_URL = "https://raw.githubusercontent.com/joestar9/price-scraper/refs/heads/main/prices.json";
+const CRYPTO_URL = "https://raw.githubusercontent.com/michaelvincentsebastian/Automated-Crypto-Market-Insights/refs/heads/main/latest-data/latest_data.csv";
 
 const COBALT_INSTANCES = [
   "https://cobalt-api.meowing.de",
   "https://cobalt-backend.canine.tools",
   "https://capi.3kh0.net",
-  "https://cobalt-api.kwiatekmiki.com",
-  "https://downloadapi.stuff.solutions",
   "https://co.wuk.sh/api/json",
-  "https://cobalt.canine.tools/",
   "https://api.cobalt.tools",
-  "https://blossom.imput.net",
-  "https://kityune.imput.net",
-  "https://nachos.imput.net",
-  "https://nuko-c.meowing.de",
-  "https://sunny.imput.net"
+  "https://blossom.imput.net"
 ];
 
-const KEY_RATES = "rates:v3:latest";
-const KEY_HASH = "rates:v3:hash";
+const KEY_RATES = "rates:final:data";
+const KEY_HASH = "rates:final:hash";
+const PAGE_SIZE = 10;
 
-// --- DICTIONARIES ---
-
-// نگاشت نام‌های فارسی ارزهای دیجیتال برای تشخیص در متن و نمایش
 const CRYPTO_PERSIAN_NAMES: Record<string, string> = {
-  "BTC": "بیت‌کوین", "ETH": "اتریوم", "USDT": "تتر", "BNB": "بایننس‌کوین",
-  "SOL": "سولانا", "XRP": "ریپل", "DOGE": "دوج‌کوین", "ADA": "کاردانو",
-  "TRX": "ترون", "AVAX": "آوالانچ", "LINK": "چین‌لینک", "DOT": "پولکادات",
-  "MATIC": "ماتیک", "LTC": "لایت‌کوین", "BCH": "بیت‌کوین‌کش", "UNI": "یونی‌سواپ",
-  "SHIB": "شیبا", "OKB": "اوکی‌بی", "XLM": "استلار", "XMR": "مونرو",
-  "ETC": "اتریوم‌کلاسیک", "HBAR": "هدرا", "FIL": "فایل‌کوین", "VET": "وی‌چین",
-  "ATOM": "اتم", "ICP": "اینترنت‌کامپیوتر", "NEAR": "نیر", "QNT": "کوانت",
-  "PEPE": "پپه", "GRT": "گراف", "RNDR": "رندر", "MKR": "میکر",
-  "STX": "استکس", "ALGO": "الگورند", "FTM": "فانتوم", "SAND": "سندباکس",
-  "MANA": "دیسنترالند", "EOS": "ایاس", "THETA": "تتا", "AAVE": "آوه",
-  "NOT": "نات‌کوین", "TON": "تون‌کوین", "KAS": "کسپا", "INJ": "اینجکتیو",
-  "TIA": "سلستیا", "SEI": "سی", "SUI": "سویی", "BONK": "بونک",
-  "WIF": "ویف", "FLOKI": "فلوکی", "FET": "فت", "AR": "آرویو",
-  "JUP": "ژوپیتر", "PYTH": "پایت", "BLUR": "بلر", "LDO": "لیدو"
+  "BTC": "بیت‌کوین", "ETH": "اتریوم", "USDT": "تتر", "BNB": "بایننس",
+  "SOL": "سولانا", "XRP": "ریپل", "DOGE": "دوج", "ADA": "کاردانو",
+  "TRX": "ترون", "AVAX": "آوالانچ", "LINK": "لینک", "DOT": "پولکادات",
+  "MATIC": "ماتیک", "LTC": "لایت‌کوین", "BCH": "بیت‌کوین‌کش", "UNI": "یونی",
+  "SHIB": "شیبا", "TON": "تون", "NOT": "نات", "PEPE": "پپه",
+  "NEAR": "نیر", "ATOM": "اتم", "ICP": "اینترنت‌کامپیوتر", "FIL": "فایل‌کوین",
+  "HBAR": "هدرا", "APT": "آپتوس", "ARB": "آربیتروم", "RNDR": "رندر",
+  "XLM": "استلار", "XMR": "مونرو", "OKB": "اوکی‌بی", "ETC": "اتریوم‌کلاسیک"
 };
 
 const META: Record<string, { emoji: string; fa: string }> = {
   usd: { emoji: "🇺🇸", fa: "دلار آمریکا" },
-  eur: { emoji: "🇪🇺", fa: "یورو" },
+  eur: { emoji: "🇪🇺", fa: "یورو اروپا" },
   gbp: { emoji: "🇬🇧", fa: "پوند انگلیس" },
   chf: { emoji: "🇨🇭", fa: "فرانک سوئیس" },
   cad: { emoji: "🇨🇦", fa: "دلار کانادا" },
   aud: { emoji: "🇦🇺", fa: "دلار استرالیا" },
-  jpy: { emoji: "🇯🇵", fa: "ین ژاپن" },
-  cny: { emoji: "🇨🇳", fa: "یوان چین" },
+  sek: { emoji: "🇸🇪", fa: "کرون سوئد" },
+  nok: { emoji: "🇳🇴", fa: "کرون نروژ" },
+  rub: { emoji: "🇷🇺", fa: "روبل روسیه" },
+  thb: { emoji: "🇹🇭", fa: "بات تایلند" },
+  sgd: { emoji: "🇸🇬", fa: "دلار سنگاپور" },
+  hkd: { emoji: "🇭🇰", fa: "دلار هنگ‌کنگ" },
+  azn: { emoji: "🇦🇿", fa: "منات آذربایجان" },
+  amd: { emoji: "🇦🇲", fa: "درام ارمنستان" },
+  dkk: { emoji: "🇩🇰", fa: "کرون دانمارک" },
   aed: { emoji: "🇦🇪", fa: "درهم امارات" },
+  jpy: { emoji: "🇯🇵", fa: "ین ژاپن" },
   try: { emoji: "🇹🇷", fa: "لیر ترکیه" },
+  cny: { emoji: "🇨🇳", fa: "یوان چین" },
+  sar: { emoji: "🇸🇦", fa: "ریال عربستان" },
+  inr: { emoji: "🇮🇳", fa: "روپیه هند" },
+  myr: { emoji: "🇲🇾", fa: "رینگیت مالزی" },
+  afn: { emoji: "🇦🇫", fa: "افغانی افغانستان" },
+  kwd: { emoji: "🇰🇼", fa: "دینار کویت" },
   iqd: { emoji: "🇮🇶", fa: "دینار عراق" },
-  afn: { emoji: "🇦🇫", fa: "افغانی" },
+  bhd: { emoji: "🇧🇭", fa: "دینار بحرین" },
+  omr: { emoji: "🇴🇲", fa: "ریال عمان" },
+  qar: { emoji: "🇶🇦", fa: "ریال قطر" },
   gold_gram_18k: { emoji: "🥇", fa: "گرم طلا ۱۸" },
   gold_mithqal: { emoji: "⚖️", fa: "مثقال طلا" },
   coin_emami: { emoji: "🌕", fa: "سکه امامی" },
@@ -71,457 +72,367 @@ const META: Record<string, { emoji: string; fa: string }> = {
   coin_gram: { emoji: "🌑", fa: "سکه گرمی" }
 };
 
-// --- TYPES ---
-
 type Rate = { 
   price: number; 
   unit: number; 
-  kind: "currency" | "gold" | "crypto"; 
+  kind: "fiat" | "gold" | "crypto"; 
   title: string; 
   emoji: string; 
   fa: string;
   usdPrice?: number;
-  change24h?: number;
+  change?: number;
 };
 
-type Stored = { 
-  fetchedAtMs: number; 
+type StoredData = { 
+  ts: number; 
   rates: Record<string, Rate> 
 };
 
-// --- HELPERS ---
-
-function normalizeDigits(input: string) {
+function normalizeDigits(s: string) {
   const map: Record<string, string> = {
     "۰":"0","۱":"1","۲":"2","۳":"3","۴":"4","۵":"5","۶":"6","۷":"7","۸":"8","۹":"9",
     "٠":"0","١":"1","٢":"2","٣":"3","٤":"4","٥":"5","٦":"6","٧":"7","٨":"8","٩":"9"
   };
-  return input.split("").map(ch => map[ch] ?? ch).join("");
+  return s.split("").map(c => map[c] ?? c).join("");
 }
 
-function norm(input: string) {
-  return normalizeDigits(input)
-    .replace(/\u200c/g, " ")
-    .replace(/[ي]/g, "ی")
-    .replace(/[ك]/g, "ک")
-    .toLowerCase()
-    .trim();
-}
-
-function stripPunct(input: string) {
-  return input.replace(/[.,!?؟؛:()[\]{}"'«»]/g, " ").replace(/\s+/g, " ").trim();
+function norm(s: string) {
+  return normalizeDigits(s).replace(/\u200c/g, " ").replace(/[ي]/g, "ی").replace(/[ك]/g, "ک").toLowerCase().trim();
 }
 
 function formatToman(n: number) {
+  if (n < 1000) return Math.round(n).toString();
   return Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 }
 
 function formatUSD(n: number) {
   if (n < 1) return n.toFixed(4);
+  if (n > 1000) return Math.round(n).toLocaleString();
   return n.toLocaleString("en-US", { maximumFractionDigits: 2 });
 }
 
-async function sha256Hex(s: string) {
-  const data = new TextEncoder().encode(s);
-  const hash = await crypto.subtle.digest("SHA-256", data);
-  const bytes = new Uint8Array(hash);
-  return Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("");
+async function sha256(s: string) {
+  const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
+  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, "0")).join("");
 }
-
-function toNum(v: any): number | null {
-  if (v == null) return null;
-  if (typeof v === "number" && Number.isFinite(v)) return v;
-  const s = String(v).replace(/,/g, "").trim();
-  const n = Number(s);
-  return Number.isFinite(n) ? n : null;
-}
-
-// --- PARSING ---
 
 function parsePersianNumber(tokens: string[]): number | null {
-  const ones: Record<string, number> = { "یک":1,"یه":1,"دو":2,"سه":3,"چهار":4,"پنج":5,"شش":6,"شیش":6,"هفت":7,"هشت":8,"نه":9 };
-  const teens: Record<string, number> = { "ده":10,"یازده":11,"دوازده":12,"سیزده":13,"چهارده":14,"پانزده":15,"شانزده":16,"هفده":17,"هجده":18,"نوزده":19 };
-  const tens: Record<string, number> = { "بیست":20,"سی":30,"چهل":40,"پنجاه":50,"شصت":60,"هفتاد":70,"هشتاد":80,"نود":90 };
-  const hundreds: Record<string, number> = { "صد":100,"یکصد":100,"دویست":200,"سیصد":300,"چهارصد":400,"پانصد":500,"شيشصد":600,"ششصد":600,"هفتصد":700,"هشتصد":800,"نهصد":900 };
-
+  const map: Record<string, number> = {
+    "یک":1,"یه":1,"دو":2,"سه":3,"چهار":4,"پنج":5,"شش":6,"شیش":6,"هفت":7,"هشت":8,"نه":9,
+    "ده":10,"یازده":11,"دوازده":12,"سیزده":13,"چهارده":14,"پانزده":15,"شانزده":16,"هفده":17,"هجده":18,"نوزده":19,
+    "بیست":20,"سی":30,"چهل":40,"پنجاه":50,"شصت":60,"هفتاد":70,"هشتاد":80,"نود":90,
+    "صد":100,"یکصد":100,"دویست":200,"سیصد":300,"چهارصد":400,"پانصد":500,"شیشصد":600,"ششصد":600,"هفتصد":700,"هشتصد":800,"نهصد":900
+  };
+  let total = 0, current = 0;
   const t = tokens.filter(x => x && x !== "و");
   if (t.length === 0) return null;
-  
-  let total = 0;
-  let current = 0;
-
   for (const w of t) {
-    if (hundreds[w]) { current += hundreds[w]; continue; }
-    if (tens[w]) { current += tens[w]; continue; }
-    if (teens[w]) { current += teens[w]; continue; }
-    if (ones[w]) { current += ones[w]; continue; }
-    // اگر کلمه عدد نبود، یعنی زنجیره پاره شده، اما ما فعلا ساده فرض میکنیم
+    if (map[w]) current += map[w];
+    else if (w === "هزار") { total += (current || 1) * 1000; current = 0; }
+    else if (w === "میلیون") { total += (current || 1) * 1000000; current = 0; }
   }
-  
-  return current > 0 ? current : null;
+  return (total + current) > 0 ? (total + current) : null;
 }
 
-function extractAmount(textNorm: string) {
-  const cleaned = stripPunct(textNorm).replace(/\s+/g, " ").trim();
-  
-  // 1. عدد ریاضی
-  const numMatch = cleaned.match(/(\d+(?:\.\d+)?)/);
+function extractAmount(text: string) {
+  const clean = text.replace(/[.,!?()[\]]/g, " ").trim();
+  const numMatch = clean.match(/(\d+(?:\.\d+)?)/);
   if (numMatch) {
     const n = Number(numMatch[1]);
     if (Number.isFinite(n) && n > 0) return n;
   }
-  
-  // 2. عدد حروفی (محدود به ۹۹۹ برای سادگی)
-  const tokens = cleaned.split(" ").filter(Boolean);
-  // پنجره ۱۰ کلمه‌ای برای پیدا کردن عدد
-  const win = tokens.slice(-10); 
+  const tokens = clean.split(/\s+/);
+  const win = tokens.slice(-10);
   for (let i = 0; i < win.length; i++) {
     for (let j = win.length; j > i; j--) {
-      const sub = win.slice(i, j);
-      const n = parsePersianNumber(sub);
-      if (n != null && n > 0) return n;
+      const n = parsePersianNumber(win.slice(i, j));
+      if (n) return n;
     }
   }
   return 1;
 }
 
-function findCode(textNorm: string, rates: Record<string, Rate>) {
-  const cleaned = stripPunct(textNorm).replace(/\s+/g, " ").trim();
-  const tokens = cleaned.split(" ");
-  const compact = cleaned.replace(/\s+/g, "");
-
-  // 1. جستجوی دقیق کد (USD, BTC)
+function findCode(text: string, rates: Record<string, Rate>) {
+  const clean = text.replace(/[.,!?]/g, "").replace(/\s+/g, "");
+  const tokens = text.split(/\s+/);
+  
   for (const t of tokens) {
-    if (t.length < 3) continue;
-    if (rates[t]) return t;
-  }
-
-  // 2. جستجوی فارسی در دیتابیس (سولانا، دلار)
-  for (const [code, rate] of Object.entries(rates)) {
-    // حذف فاصله‌ها از نام فارسی برای مقایسه (بیت کوین -> بیتکوین)
-    const faClean = rate.fa.replace(/\s+/g, "");
-    if (compact.includes(faClean) || compact.includes(code)) return code;
-    
-    // بررسی کلمات کلیدی خاص (مثل "تتر")
-    if (rate.title.toLowerCase() === compact) return code;
+    if (t.length >= 3 && rates[t]) return t;
   }
   
-  // 3. بررسی آلیاس‌های سخت (مثل "طلا")
-  if (compact.includes("طلا")) return "gold_gram_18k";
-  if (compact.includes("سکه") || compact.includes("امامی")) return "coin_emami";
-  if (compact.includes("مثقال")) return "gold_mithqal";
-  if (compact.includes("دلار")) return "usd";
-  if (compact.includes("یورو")) return "eur";
-
+  for (const [code, r] of Object.entries(rates)) {
+    const fa = r.fa.replace(/\s+/g, "");
+    if (clean.includes(fa) || clean.includes(code)) return code;
+    if (r.title.toLowerCase().replace(/\s+/g, "") === clean) return code;
+  }
+  
+  if (clean.includes("طلا")) return "gold_gram_18k";
+  if (clean.includes("سکه")) return "coin_emami";
+  if (clean.includes("دلار")) return "usd";
+  if (clean.includes("یورو")) return "eur";
   return null;
 }
 
-// --- FETCH DATA ---
-
 function parseCSV(text: string) {
   const lines = text.split("\n");
-  const result = [];
+  const res = [];
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i].trim();
     if (!line) continue;
     const parts = line.split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/);
     if (parts.length < 6) continue;
-    const name = parts[1].replace(/"/g, "").trim();
     const symbol = parts[2].replace(/"/g, "").trim().toLowerCase();
-    const priceStr = parts[5];
-    const changeStr = parts[9];
-    const price = parseFloat(priceStr);
-    const change = parseFloat(changeStr);
-    if (!isNaN(price) && symbol) result.push({ symbol, name, price, change });
+    const name = parts[1].replace(/"/g, "").trim();
+    const price = parseFloat(parts[5]);
+    const change = parseFloat(parts[9]);
+    if (symbol && !isNaN(price)) res.push({ symbol, name, price, change });
   }
-  return result;
+  return res;
 }
 
-async function fetchAndMergeData(env: Env): Promise<{ stored: Stored; rawHash: string }> {
-  const headers = { "User-Agent": "Bot/1.0" };
-  const [resJson, resCsv] = await Promise.all([
-    fetch(PRICES_JSON_URL, { headers }),
-    fetch(CRYPTO_CSV_URL, { headers })
+async function fetchRates(env: Env): Promise<{ data: StoredData; hash: string }> {
+  const [jRes, cRes] = await Promise.all([
+    fetch(PRICES_URL),
+    fetch(CRYPTO_URL)
   ]);
-
+  
   const rates: Record<string, Rate> = {};
   
-  // 1. ارز و طلا
-  if (resJson.ok) {
-    const j = await resJson.json<any>();
-    const items = Array.isArray(j?.items) ? j.items : [];
-    for (const it of items) {
-      const type = String(it?.type ?? "").toLowerCase();
-      const name = String(it?.name ?? "").trim();
-      const price = toNum(it?.price);
-      if (!name || price == null || price <= 0) continue;
-      
+  if (jRes.ok) {
+    const data = await jRes.json<any>();
+    for (const item of (data.items || [])) {
+      const type = (item.type || "").toLowerCase();
+      const rawName = (item.name || "").trim();
+      const priceVal = Number(String(item.price).replace(/,/g, ""));
+      if (!rawName || !priceVal) continue;
+
       if (type === "currency") {
-        const m = name.match(/^([A-Z]{3})\s*(.*)$/);
-        if (!m) continue;
-        const code = m[1].toLowerCase();
-        const meta = META[code] ?? { emoji: "💱", fa: code.toUpperCase() };
-        rates[code] = { price, unit: 1, kind: "currency", title: name, emoji: meta.emoji, fa: meta.fa };
+        const m = rawName.match(/^([A-Z]{3})\s*(\d+)?(.*)$/);
+        if (m) {
+          const code = m[1].toLowerCase();
+          const unit = m[2] ? parseInt(m[2]) : 1;
+          const meta = META[code] ?? { emoji: "🏳️", fa: code.toUpperCase() };
+          rates[code] = { price: priceVal, unit: unit, kind: "fiat", title: rawName, emoji: meta.emoji, fa: meta.fa };
+        }
       } else if (type === "gold") {
-        const nn = name.toLowerCase();
-        const key = nn.includes("mithqal") ? "gold_mithqal" : nn.includes("coin") ? "coin_emami" : "gold_gram_18k";
+        let key = "gold_gram_18k";
+        const n = rawName.toLowerCase();
+        if (n.includes("mithqal")) key = "gold_mithqal";
+        else if (n.includes("coin")) key = "coin_emami";
         const meta = META[key] ?? { emoji: "💰", fa: "طلا" };
-        rates[key] = { price, unit: 1, kind: "gold", title: name, emoji: meta.emoji, fa: meta.fa };
+        rates[key] = { price: priceVal, unit: 1, kind: "gold", title: rawName, emoji: meta.emoji, fa: meta.fa };
       }
     }
   }
 
-  // نرخ دلار برای تبدیل
-  let usdToToman = rates["usd"] ? rates["usd"].price : 60000;
+  const usdRate = (rates["usd"]?.price || 60000) / (rates["usd"]?.unit || 1);
 
-  // 2. کریپتو
-  if (resCsv.ok) {
-    const csvItems = parseCSV(await resCsv.text());
-    for (const c of csvItems) {
-      if (rates[c.symbol] && rates[c.symbol].kind === "currency") continue; // اولویت با فیات
-
-      // پیدا کردن نام فارسی
-      const faName = CRYPTO_PERSIAN_NAMES[c.symbol.toUpperCase()] || c.name;
-
-      rates[c.symbol] = {
-        price: c.price * usdToToman,
+  if (cRes.ok) {
+    const rows = parseCSV(await cRes.text());
+    for (const row of rows) {
+      if (rates[row.symbol] && rates[row.symbol].kind === "fiat") continue;
+      rates[row.symbol] = {
+        price: row.price * usdRate,
         unit: 1,
         kind: "crypto",
-        title: c.name,
+        title: row.name,
         emoji: "💎",
-        fa: faName,
-        usdPrice: c.price,
-        change24h: c.change
+        fa: CRYPTO_PERSIAN_NAMES[row.symbol.toUpperCase()] || row.symbol.toUpperCase(),
+        usdPrice: row.price,
+        change: row.change
       };
     }
   }
 
-  const stored: Stored = { fetchedAtMs: Date.now(), rates };
-  const rawHash = await sha256Hex(JSON.stringify(rates));
-  return { stored, rawHash };
+  const data = { ts: Date.now(), rates };
+  const hash = await sha256(JSON.stringify(rates));
+  return { data, hash };
 }
 
-async function refreshRates(env: Env) {
-  const { stored, rawHash } = await fetchAndMergeData(env);
-  const prevHash = await env.BOT_KV.get(KEY_HASH);
-  if (prevHash !== rawHash) {
-    await env.BOT_KV.put(KEY_HASH, rawHash);
-    await env.BOT_KV.put(KEY_RATES, JSON.stringify(stored));
-    return { ok: true, changed: true };
+async function updateRates(env: Env) {
+  const { data, hash } = await fetchRates(env);
+  const oldHash = await env.BOT_KV.get(KEY_HASH);
+  if (hash !== oldHash) {
+    await env.BOT_KV.put(KEY_HASH, hash);
+    await env.BOT_KV.put(KEY_RATES, JSON.stringify(data));
   }
-  return { ok: true, changed: false };
+  return data;
 }
 
-// --- TELEGRAM & UI ---
+function makeKeyboard(rates: Record<string, Rate>, mode: 'fiat'|'crypto', page: number) {
+  const all = Object.keys(rates).filter(k => {
+    const r = rates[k];
+    if (mode === 'fiat') return r.kind === 'fiat' || r.kind === 'gold';
+    return r.kind === 'crypto';
+  });
 
-async function tgSend(env: Env, chatId: number, text: string, replyMarkup?: any) {
-  await fetch(`https://api.telegram.org/bot${env.TG_TOKEN}/sendMessage`, {
-    method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text, parse_mode: "HTML", reply_markup: replyMarkup, disable_web_page_preview: true })
-  }).catch(() => {});
-}
+  const priority = ["usd", "eur", "aed", "gbp", "try", "iqd", "gold_gram_18k", "coin_emami", "btc", "eth", "usdt", "ton", "not", "trx", "doge"];
+  all.sort((a, b) => {
+    const pa = priority.indexOf(a), pb = priority.indexOf(b);
+    if (pa !== -1 && pb !== -1) return pa - pb;
+    if (pa !== -1) return -1;
+    if (pb !== -1) return 1;
+    return 0;
+  });
 
-async function tgEdit(env: Env, chatId: number, msgId: number, text: string, replyMarkup?: any) {
-  await fetch(`https://api.telegram.org/bot${env.TG_TOKEN}/editMessageText`, {
-    method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, message_id: msgId, text, parse_mode: "HTML", reply_markup: replyMarkup, disable_web_page_preview: true })
-  }).catch(() => {});
+  const total = Math.ceil(all.length / PAGE_SIZE);
+  const slice = all.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+  const buttons = [];
+
+  for (const k of slice) {
+    const r = rates[k];
+    const per1 = r.price / r.unit;
+    let txt = "";
+    if (mode === 'fiat') txt = `${r.emoji} ${r.fa}: ${formatToman(per1)} ت`;
+    else txt = `${r.emoji} ${r.fa}: ${formatUSD(r.usdPrice!)}$ | ${formatToman(per1)} ت`;
+    buttons.push([{ text: txt, callback_data: "noop" }]);
+  }
+
+  const nav = [];
+  if (page > 0) nav.push({ text: "▶️ قبلی", callback_data: `list:${mode}:${page-1}` });
+  nav.push({ text: "🏠 خانه", callback_data: "type_select" });
+  if (page < total - 1) nav.push({ text: "بعدی ◀️", callback_data: `list:${mode}:${page+1}` });
+  
+  buttons.push(nav);
+  buttons.push([{text: "🔙 منوی اصلی", callback_data: "start"}]);
+
+  return {
+    text: mode === 'fiat' ? `💵 <b>نرخ ارز و طلا</b> (صفحه ${page+1}/${total})` : `🚀 <b>نرخ ارز دیجیتال</b> (صفحه ${page+1}/${total})`,
+    markup: { inline_keyboard: buttons }
+  };
 }
 
 const MENUS = {
   start: {
     inline_keyboard: [
       [{ text: "➕ افزودن به گروه", url: `https://t.me/${BOT_USERNAME}?startgroup=start` }, { text: "📘 راهنما", callback_data: "help" }],
-      [{ text: "📊 لیست قیمت‌ها", callback_data: "list_type" }]
+      [{ text: "📊 مشاهده قیمت‌ها", callback_data: "type_select" }]
     ]
   },
-  listType: {
+  types: {
     inline_keyboard: [
-      [{ text: "💵 ارز و طلا", callback_data: "get_fiat" }, { text: "🚀 ارز دیجیتال", callback_data: "get_crypto" }],
+      [{ text: "💵 ارز و طلا", callback_data: "list:fiat:0" }, { text: "🚀 ارز دیجیتال", callback_data: "list:crypto:0" }],
       [{ text: "🔙 بازگشت", callback_data: "start" }]
     ]
   },
-  back: { inline_keyboard: [[{ text: "🔙 منوی اصلی", callback_data: "start" }]] }
+  back: { inline_keyboard: [[{ text: "🔙 بازگشت", callback_data: "start" }]] }
 };
 
-function buildFiatList(rates: Record<string, Rate>) {
-  const lines = ["💵 <b>نرخ بازار آزاد</b>\n"];
-  const gold = [], fiat = [];
-  const priority = ["usd", "eur", "aed", "gbp", "try", "afn", "iqd"];
-  
-  Object.keys(rates).sort().forEach(k => {
-    const r = rates[k];
-    if (r.kind === "crypto") return;
-    const txt = `${r.emoji} ${r.fa}: <code>${formatToman(r.price)}</code> ت`;
-    if (r.kind === "gold") gold.push(txt);
-    else fiat.push({ k, txt });
-  });
-
-  fiat.sort((a, b) => {
-    const idxA = priority.indexOf(a.k), idxB = priority.indexOf(b.k);
-    if (idxA !== -1 && idxB !== -1) return idxA - idxB;
-    return idxA !== -1 ? -1 : idxB !== -1 ? 1 : 0;
-  });
-
-  lines.push(...gold, "➖➖➖", ...fiat.map(x => x.txt));
-  return lines.join("\n");
-}
-
-function buildCryptoList(rates: Record<string, Rate>) {
-  const lines = ["🚀 <b>بازار ارز دیجیتال</b>\n"];
-  const cryptos = [];
-  const priority = ["btc", "eth", "ton", "usdt", "not", "doge", "shib", "trx", "sol"];
-
-  Object.keys(rates).forEach(k => {
-    const r = rates[k];
-    if (r.kind !== "crypto") return;
-    cryptos.push({ 
-      k, 
-      txt: `🔹 <b>${r.fa}</b> (${k.toUpperCase()})\n   <code>${formatToman(r.price)}</code> ت | <code>${formatUSD(r.usdPrice!)}</code>$ | ${(r.change24h||0)>0?"🟢":"🔴"}%`
-    });
-  });
-
-  cryptos.sort((a, b) => {
-    const idxA = priority.indexOf(a.k), idxB = priority.indexOf(b.k);
-    if (idxA !== -1 && idxB !== -1) return idxA - idxB;
-    return idxA !== -1 ? -1 : idxB !== -1 ? 1 : 0;
-  });
-
-  lines.push(...cryptos.map(x => x.txt));
-  return lines.join("\n");
-}
-
-async function handleInstagram(env: Env, chatId: number, text: string) {
-  const url = text.match(/(https?:\/\/(?:www\.)?instagram\.com\/[^ \n]+)/)?.[1];
-  if (!url) return;
-  
-  await tgSend(env, chatId, "⏳ در حال دانلود...");
-  
-  for (const base of COBALT_INSTANCES) {
-    try {
-      const res = await fetch(`${base}/api/json`, {
-        method: "POST", headers: { "content-type": "application/json", "Accept": "application/json" },
-        body: JSON.stringify({ url, vCodec: "h264" })
-      });
-      if (res.ok) {
-        const data = await res.json<any>();
-        if (data.status === "stream" || data.status === "redirect") {
-          await fetch(`https://api.telegram.org/bot${env.TG_TOKEN}/sendVideo`, {
-             method: "POST", headers: { "content-type": "application/json" },
-             body: JSON.stringify({ chat_id: chatId, video: data.url, caption: "✅ دانلود شد" }) 
-          });
-          return;
-        }
-      }
-    } catch (e) {}
-  }
-  await tgSend(env, chatId, "❌ خطا در دانلود.");
-}
-
-// --- WORKER ENTRY ---
-
 export default {
-  async scheduled(_e: any, env: Env, _c: any) { await refreshRates(env).catch(()=>{}); },
+  async scheduled(_e: any, env: Env, _c: any) { await updateRates(env).catch(()=>{}); },
 
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
-    if (url.pathname === "/refresh" && url.searchParams.get("key") === env.ADMIN_KEY) {
-      await refreshRates(env);
-      return new Response("OK");
-    }
     if (req.method !== "POST") return new Response("OK");
-
-    const update = await req.json<any>().catch(()=>null);
+    const update = await req.json<any>().catch(() => null);
     if (!update || update.edited_message) return new Response("OK");
 
-    // Callback Handler
     if (update.callback_query) {
       const cb = update.callback_query;
       const data = cb.data;
       const cid = cb.message.chat.id;
       const mid = cb.message.message_id;
 
-      let txt = "", kb = null;
-      
-      if (data === "start") { txt = "👋 سلام! چطور میتونم کمکت کنم؟"; kb = MENUS.start; }
-      else if (data === "help") { 
-        txt = "🤖 <b>راهنما:</b>\n\n1️⃣ <b>قیمت:</b> ارسال نام (دلار، بیت کوین، طلا)\n2️⃣ <b>تبدیل:</b> مقدار + نام (۱۰۰ دلار، دو سولانا)\n3️⃣ <b>دانلود:</b> ارسال لینک اینستاگرام"; 
-        kb = MENUS.back; 
-      }
-      else if (data === "list_type") { txt = "نوع ارز را انتخاب کنید:"; kb = MENUS.listType; }
-      else if (data === "get_fiat" || data === "get_crypto") {
-        const stored = await env.BOT_KV.get(KEY_RATES).then(x => x ? JSON.parse(x) : null);
-        if (!stored) { await tgSend(env, cid, "⚠️ داده‌ای نیست."); return new Response("OK"); }
-        
-        const list = data === "get_fiat" ? buildFiatList(stored.rates) : buildCryptoList(stored.rates);
-        // ارسال لیست به صورت چند پیام اگر طولانی باشد
-        const chunks = [];
-        for (let i = 0; i < list.length; i += 3800) chunks.push(list.slice(i, i + 3800));
-        
-        await tgSend(env, cid, chunks[0]); // پیام اول
-        for(let i=1; i<chunks.length; i++) await tgSend(env, cid, chunks[i]);
-        
-        // پاسخ به کال بک برای بستن لودینگ
-        await fetch(`https://api.telegram.org/bot${env.TG_TOKEN}/answerCallbackQuery`, {
-          method: "POST", headers:{"content-type":"application/json"}, body:JSON.stringify({callback_query_id:cb.id})
-        });
-        return new Response("OK");
-      }
+      try {
+        if (data === "noop") {
+           await fetch(`https://api.telegram.org/bot${env.TG_TOKEN}/answerCallbackQuery`, {
+             method: "POST", headers:{"content-type":"application/json"},
+             body: JSON.stringify({ callback_query_id: cb.id, text: "بروزرسانی شد ✅" })
+           });
+           return new Response("OK");
+        }
 
-      if (txt) await tgEdit(env, cid, mid, txt, kb);
+        let text = "", markup = null;
+
+        if (data === "start") { text = "👋 به ربات خوش آمدید."; markup = MENUS.start; }
+        else if (data === "type_select") { text = "👇 بازار مورد نظر را انتخاب کنید:"; markup = MENUS.types; }
+        else if (data === "help") { text = "🤖 <b>راهنما:</b>\n\nبرای دیدن قیمت‌ها از دکمه‌ها استفاده کنید.\nدر چت نام ارز یا مقدار آن را بفرستید (مثلا: دلار، ۱۰۰ بیت کوین).\nلینک اینستاگرام برای دانلود بفرستید."; markup = MENUS.back; }
+        else if (data.startsWith("list:")) {
+          const parts = data.split(":");
+          const stored = await env.BOT_KV.get(KEY_RATES).then(x => x ? JSON.parse(x) : null);
+          if (stored) {
+            const ui = makeKeyboard(stored.rates, parts[1] as any, parseInt(parts[2]));
+            text = ui.text;
+            markup = ui.markup;
+          }
+        }
+
+        if (text) {
+           await fetch(`https://api.telegram.org/bot${env.TG_TOKEN}/editMessageText`, {
+             method: "POST", headers:{"content-type":"application/json"},
+             body: JSON.stringify({ chat_id: cid, message_id: mid, text, parse_mode: "HTML", reply_markup: markup })
+           });
+        }
+      } catch (e) {}
+      
       await fetch(`https://api.telegram.org/bot${env.TG_TOKEN}/answerCallbackQuery`, {
-          method: "POST", headers:{"content-type":"application/json"}, body:JSON.stringify({callback_query_id:cb.id})
+        method: "POST", headers:{"content-type":"application/json"},
+        body: JSON.stringify({ callback_query_id: cb.id })
       });
       return new Response("OK");
     }
 
-    // Message Handler
     const msg = update.message;
     if (!msg || !msg.text) return new Response("OK");
-    
-    // Check Cooldown & Timeout
     const now = Math.floor(Date.now()/1000);
-    if (now - msg.date > 40) return new Response("OK"); // پیام قدیمی
-    
+    if (now - msg.date > 40) return new Response("OK");
+
     const uid = msg.from.id;
     if (await env.BOT_KV.get(`cd:${uid}`)) return new Response("OK");
-    ctx.waitUntil(env.BOT_KV.put(`cd:${uid}`, "1", { expirationTtl: 4 }));
+    ctx.waitUntil(env.BOT_KV.put(`cd:${uid}`, "1", { expirationTtl: 3 }));
 
     const text = msg.text;
     const cid = msg.chat.id;
+    const replyTo = msg.message_id;
 
     if (text.includes("instagram.com")) {
-      ctx.waitUntil(handleInstagram(env, cid, text));
+      ctx.waitUntil((async () => {
+        await fetch(`https://api.telegram.org/bot${env.TG_TOKEN}/sendChatAction`, {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({chat_id: cid, action: "upload_video"})});
+        const url = text.match(/(https?:\/\/(?:www\.)?instagram\.com\/[^ \n]+)/)?.[1];
+        if (url) {
+          for (const base of COBALT_INSTANCES) {
+            try {
+              const r = await fetch(base + "/api/json", {method:"POST", headers:{"content-type":"application/json","Accept":"application/json"}, body:JSON.stringify({url, vCodec:"h264"})});
+              const d = await r.json<any>();
+              if (d.status === "stream" || d.status === "redirect") {
+                await fetch(`https://api.telegram.org/bot${env.TG_TOKEN}/sendVideo`, {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({chat_id: cid, video: d.url, caption: "✅ دانلود شد", reply_to_message_id: replyTo})});
+                return;
+              }
+            } catch(e){}
+          }
+          await fetch(`https://api.telegram.org/bot${env.TG_TOKEN}/sendMessage`, {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({chat_id: cid, text: "❌ خطا در دانلود", reply_to_message_id: replyTo})});
+        }
+      })());
       return new Response("OK");
     }
 
     const normText = norm(text);
-    const cmd = text.split(" ")[0].split("@")[0];
-
-    if (cmd === "/start") {
-      await tgSend(env, cid, "👋 سلام! من ربات قیمت و ابزار هستم.", MENUS.start);
+    if (normText === "/start") {
+      await fetch(`https://api.telegram.org/bot${env.TG_TOKEN}/sendMessage`, {
+        method: "POST", headers:{"content-type":"application/json"},
+        body: JSON.stringify({ chat_id: cid, text: "👋 سلام! چه کاری انجام دهم؟", reply_markup: MENUS.start, reply_to_message_id: replyTo })
+      });
       return new Response("OK");
     }
 
-    // Price Logic
     const storedStr = await env.BOT_KV.get(KEY_RATES);
-    if (!storedStr) return new Response("OK");
-    const stored = JSON.parse(storedStr);
-
-    const code = findCode(normText, stored.rates);
-    if (code) {
-      const amount = extractAmount(normText);
-      const r = stored.rates[code];
-      const val = r.price * amount;
-      
-      let res = "";
-      if (r.kind === "crypto") {
-        res = `💎 <b>${amount} ${r.fa}</b>\n💵 ${formatUSD(r.usdPrice! * amount)}$\n🇮🇷 ${formatToman(val)} تومان`;
-      } else {
-        res = `${r.emoji} <b>${amount} ${r.fa}</b> = <code>${formatToman(val)}</code> تومان`;
+    if (storedStr) {
+      const stored = JSON.parse(storedStr);
+      const code = findCode(normText, stored.rates);
+      if (code) {
+        const amount = extractAmount(normText);
+        const r = stored.rates[code];
+        const per1 = r.price / r.unit;
+        const val = per1 * amount;
+        let res = "";
+        if (r.kind === "crypto") res = `💎 <b>${amount} ${r.fa}</b> (${code.toUpperCase()})\n💵 ${formatUSD(r.usdPrice!*amount)}$\n🇮🇷 ${formatToman(val)} تومان\n📊 تغییر: ${r.change}%`;
+        else res = `${r.emoji} <b>${amount} ${r.fa}</b> = <code>${formatToman(val)}</code> تومان`;
+        
+        await fetch(`https://api.telegram.org/bot${env.TG_TOKEN}/sendMessage`, {
+          method: "POST", headers:{"content-type":"application/json"},
+          body: JSON.stringify({ chat_id: cid, text: res, parse_mode: "HTML", reply_to_message_id: replyTo })
+        });
       }
-      
-      await tgSend(env, cid, res);
     }
 
     return new Response("OK");
