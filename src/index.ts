@@ -317,12 +317,15 @@ async function getStoredOrRefresh(env: Env, ctx: ExecutionContext): Promise<Stor
 function buildAll(stored: Stored) {
   const codes = Object.keys(stored.rates).sort();
   const lines: string[] = [];
+
   for (const c of codes.slice(0, 220)) {
     const r = stored.rates[c];
     const per1 = r.price / (r.unit || 1);
-    if (r.kind === "currency") lines.push(`${r.emoji} ${c.toUpperCase()} = ${formatToman(per1)} تومان`);
+
+    if (r.kind === "currency") lines.push(`1 ${r.fa} = ${formatToman(per1)} تومان`);
     else lines.push(`${r.emoji} ${r.fa} = ${formatToman(per1)} تومان`);
   }
+
   return lines.join("\n");
 }
 
@@ -330,12 +333,11 @@ function replyCurrency(r: Rate, amount: number) {
   const per1 = r.price / (r.unit || 1);
   const total = per1 * amount;
   const aStr = Number.isInteger(amount) ? String(amount) : String(amount);
-  if (amount === 1) return `${r.emoji} 1 ${r.fa} = ${formatToman(per1)} تومان`;
-  return [
-    `${r.emoji} 1 ${r.fa} = ${formatToman(per1)} تومان`,
-    `${r.emoji} ${aStr} ${r.fa} = ${formatToman(total)} تومان`
-  ].join("\n");
+
+  if (amount <= 1) return `1 ${r.fa} = ${formatToman(per1)} تومان`;
+  return `${aStr} ${r.fa} = ${formatToman(total)} تومان`;
 }
+
 
 function replyGold(rGold: Rate, amount: number, stored: Stored) {
   const per1Toman = rGold.price / (rGold.unit || 1);
