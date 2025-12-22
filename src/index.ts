@@ -75,28 +75,10 @@ const ALIASES: Array<{ keys: string[]; code: string }> = [
 
 function normalizeDigits(input: string) {
   const map: Record<string, string> = {
-    "۰": "0",
-    "۱": "1",
-    "۲": "2",
-    "۳": "3",
-    "۴": "4",
-    "۵": "5",
-    "۶": "6",
-    "۷": "7",
-    "۸": "8",
-    "۹": "9",
-    "٠": "0",
-    "١": "1",
-    "٢": "2",
-    "٣": "3",
-    "٤": "4",
-    "٥": "5",
-    "٦": "6",
-    "٧": "7",
-    "٨": "8",
-    "٩": "9"
+    "۰":"0","۱":"1","۲":"2","۳":"3","۴":"4","۵":"5","۶":"6","۷":"7","۸":"8","۹":"9",
+    "٠":"0","١":"1","٢":"2","٣":"3","٤":"4","٥":"5","٦":"6","٧":"7","٨":"8","٩":"9"
   };
-  return input.split("").map((ch) => map[ch] ?? ch).join("");
+  return input.split("").map(ch => map[ch] ?? ch).join("");
 }
 
 function norm(input: string) {
@@ -126,7 +108,7 @@ async function sha256Hex(s: string) {
   const data = new TextEncoder().encode(s);
   const hash = await crypto.subtle.digest("SHA-256", data);
   const bytes = new Uint8Array(hash);
-  return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
 function toNum(v: any): number | null {
@@ -190,27 +172,25 @@ function normalizeRatesJson(j: any): Stored {
 
 async function fetchPricesFromGithub(env: Env): Promise<{ stored: Stored; rawHash: string }> {
   const etag = await env.BOT_KV.get(KEY_ETAG);
-  const headers: Record<string, string> = { accept: "application/json" };
+  const headers: Record<string, string> = { "accept": "application/json" };
   if (etag) headers["if-none-match"] = etag;
 
   const res = await fetch(PRICES_URL, { method: "GET", headers });
-
+  const txt = await res.text().catch(() => "");
   if (res.status === 304) {
-    const txt = await env.BOT_KV.get(KEY_RATES);
-    if (txt) {
-      const stored = JSON.parse(txt) as Stored;
+    const cached = await env.BOT_KV.get(KEY_RATES);
+    if (cached) {
+      const stored = JSON.parse(cached) as Stored;
       const rawHash = await sha256Hex(JSON.stringify(stored.rates));
       return { stored, rawHash };
     }
   }
-  if (!res.ok) {
-    const t = await res.text().catch(() => "");
-    throw new Error(`GitHub HTTP ${res.status} ${t.slice(0, 160)}`);
-  }
+  if (!res.ok) throw new Error(`GitHub HTTP ${res.status} ${txt.slice(0, 160)}`);
+
   const newEtag = res.headers.get("etag");
   if (newEtag) await env.BOT_KV.put(KEY_ETAG, newEtag);
 
-  const json = await res.json();
+  const json = JSON.parse(txt);
   const stored = normalizeRatesJson(json);
   const rawHash = await sha256Hex(JSON.stringify(stored.rates));
   return { stored, rawHash };
@@ -231,11 +211,11 @@ async function refreshRates(env: Env) {
 }
 
 function parsePersianNumberUpTo100(tokens: string[]): number | null {
-  const ones: Record<string, number> = { "یک": 1, "یه": 1, "دو": 2, "سه": 3, "چهار": 4, "پنج": 5, "شش": 6, "شیش": 6, "هفت": 7, "هشت": 8, "نه": 9 };
-  const teens: Record<string, number> = { "ده": 10, "یازده": 11, "دوازده": 12, "سیزده": 13, "چهارده": 14, "پانزده": 15, "شانزده": 16, "هفده": 17, "هجده": 18, "نوزده": 19 };
-  const tens: Record<string, number> = { "بیست": 20, "سی": 30, "چهل": 40, "پنجاه": 50, "شصت": 60, "هفتاد": 70, "هشتاد": 80, "نود": 90 };
+  const ones: Record<string, number> = { "یک":1,"یه":1,"دو":2,"سه":3,"چهار":4,"پنج":5,"شش":6,"شیش":6,"هفت":7,"هشت":8,"نه":9 };
+  const teens: Record<string, number> = { "ده":10,"یازده":11,"دوازده":12,"سیزده":13,"چهارده":14,"پانزده":15,"شانزده":16,"هفده":17,"هجده":18,"نوزده":19 };
+  const tens: Record<string, number> = { "بیست":20,"سی":30,"چهل":40,"پنجاه":50,"شصت":60,"هفتاد":70,"هشتاد":80,"نود":90 };
 
-  const t = tokens.filter((x) => x && x !== "و");
+  const t = tokens.filter(x => x && x !== "و");
   if (t.length === 0) return null;
 
   const joined = t.join("").replace(/\s+/g, "");
@@ -264,7 +244,7 @@ function parsePersianNumberUpTo100(tokens: string[]): number | null {
 function findCode(textNorm: string) {
   const cleaned = stripPunct(textNorm).replace(/\s+/g, " ").trim();
   const compact = cleaned.replace(/\s+/g, "");
-  const keys = ALIASES.flatMap((a) => a.keys.map((k) => ({ k: norm(k).replace(/\s+/g, ""), code: a.code }))).sort((x, y) => y.k.length - x.k.length);
+  const keys = ALIASES.flatMap(a => a.keys.map(k => ({ k: norm(k).replace(/\s+/g, ""), code: a.code }))).sort((x, y) => y.k.length - x.k.length);
 
   for (const it of keys) {
     if (compact.includes(it.k)) return it.code;
@@ -303,60 +283,73 @@ function escapeHtml(s: string) {
 }
 
 function cancelBody(res: Response | null | undefined) {
+  try { res?.body?.cancel(); } catch {}
+}
+
+async function fetchJson(url: string, init: RequestInit, timeoutMs: number) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+  let res: Response | null = null;
   try {
-    res?.body?.cancel();
-  } catch {}
+    res = await fetch(url, { ...init, signal: controller.signal });
+    const text = await res.text().catch(() => "");
+    const json = text ? (JSON.parse(text) as any) : null;
+    return { ok: res.ok, status: res.status, headers: res.headers, json, text };
+  } catch (e: any) {
+    cancelBody(res);
+    return { ok: false, status: 0, headers: new Headers(), json: null, text: String(e?.message ?? e ?? "") };
+  } finally {
+    clearTimeout(t);
+  }
 }
 
 async function tgCall(env: Env, method: string, body: any) {
   const url = `https://api.telegram.org/bot${env.TG_TOKEN}/${method}`;
-  const res = await fetch(url, {
+  const r = await fetchJson(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body)
-  }).catch(() => null as any);
-
-  const json = await res?.json?.().catch(() => null);
-  if (!json) cancelBody(res);
-  return { resOk: !!res?.ok, tgOk: !!json?.ok, json };
+  }, 20000);
+  const tgOk = !!r.json?.ok;
+  return { tgOk, json: r.json };
 }
 
-async function tgSend(env: Env, chatId: number, text: string, replyTo?: number) {
+async function tgSendText(env: Env, chatId: number, text: string, replyTo?: number) {
   const body: any = { chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true };
-  if (replyTo) {
-    body.reply_to_message_id = replyTo;
-    body.allow_sending_without_reply = true;
-  }
+  if (replyTo) { body.reply_to_message_id = replyTo; body.allow_sending_without_reply = true; }
   await tgCall(env, "sendMessage", body);
 }
 
-async function tgSendVideo(env: Env, chatId: number, videoUrl: string, caption: string, replyTo?: number) {
-  const body: any = { chat_id: chatId, video: videoUrl, caption, parse_mode: "HTML" };
-  if (replyTo) {
-    body.reply_to_message_id = replyTo;
-    body.allow_sending_without_reply = true;
-  }
+async function tgChatAction(env: Env, chatId: number, action: string) {
+  const body: any = { chat_id: chatId, action };
+  await tgCall(env, "sendChatAction", body);
+}
+
+async function tgSendVideo(env: Env, chatId: number, url: string, caption: string, replyTo?: number) {
+  const body: any = { chat_id: chatId, video: url, caption, parse_mode: "HTML" };
+  if (replyTo) { body.reply_to_message_id = replyTo; body.allow_sending_without_reply = true; }
   const r = await tgCall(env, "sendVideo", body);
   return r.tgOk;
 }
 
-async function tgSendPhoto(env: Env, chatId: number, photoUrl: string, caption: string, replyTo?: number) {
-  const body: any = { chat_id: chatId, photo: photoUrl, caption, parse_mode: "HTML" };
-  if (replyTo) {
-    body.reply_to_message_id = replyTo;
-    body.allow_sending_without_reply = true;
-  }
+async function tgSendPhoto(env: Env, chatId: number, url: string, caption: string, replyTo?: number) {
+  const body: any = { chat_id: chatId, photo: url, caption, parse_mode: "HTML" };
+  if (replyTo) { body.reply_to_message_id = replyTo; body.allow_sending_without_reply = true; }
   const r = await tgCall(env, "sendPhoto", body);
   return r.tgOk;
 }
 
-async function tgSendAudio(env: Env, chatId: number, audioUrl: string, caption: string, replyTo?: number) {
-  const body: any = { chat_id: chatId, audio: audioUrl, caption, parse_mode: "HTML" };
-  if (replyTo) {
-    body.reply_to_message_id = replyTo;
-    body.allow_sending_without_reply = true;
-  }
+async function tgSendAudio(env: Env, chatId: number, url: string, caption: string, replyTo?: number) {
+  const body: any = { chat_id: chatId, audio: url, caption, parse_mode: "HTML" };
+  if (replyTo) { body.reply_to_message_id = replyTo; body.allow_sending_without_reply = true; }
   const r = await tgCall(env, "sendAudio", body);
+  return r.tgOk;
+}
+
+async function tgSendDocument(env: Env, chatId: number, url: string, caption: string, replyTo?: number) {
+  const body: any = { chat_id: chatId, document: url, caption, parse_mode: "HTML" };
+  if (replyTo) { body.reply_to_message_id = replyTo; body.allow_sending_without_reply = true; }
+  const r = await tgCall(env, "sendDocument", body);
   return r.tgOk;
 }
 
@@ -366,137 +359,222 @@ function chunkText(s: string, maxLen = 3500) {
   return out;
 }
 
+function extractFirstUrl(text: string) {
+  const m = text.match(/(https?:\/\/[^\s]+)/i);
+  return m ? m[1] : null;
+}
+
+function normalizeMediaUrl(inputUrl: string) {
+  let u: URL;
+  try { u = new URL(inputUrl); } catch { return null; }
+
+  if (u.hostname.includes("x.com")) u.hostname = "twitter.com";
+  if (u.hostname.includes("twitter.com") || u.hostname.includes("instagram.com")) u.search = "";
+
+  return u.toString();
+}
+
 function looksLikeHls(u: string) {
   const x = u.toLowerCase();
   return /\.m3u8(\?|$)/i.test(x) || x.includes("m3u8");
 }
 
-function buildLinksMessage(urls: string[]) {
+function ext(u: string) {
+  const q = u.split("?")[0];
+  const m = q.match(/\.([a-z0-9]{2,5})$/i);
+  return m ? m[1].toLowerCase() : "";
+}
+
+function buildLinksMessage(title: string, urls: string[]) {
   const lines = urls.slice(0, 20).map((u, i) => `${i + 1}) <code>${escapeHtml(u)}</code>`);
-  return `🔗 لینک استخراج‌شده از Cobalt:\n${lines.join("\n")}`;
+  return `${title}\n${lines.join("\n")}`;
 }
 
-async function sendLinks(env: Env, chatId: number, urls: string[], replyTo?: number) {
-  const msg = buildLinksMessage(urls);
-  for (const part of chunkText(msg, 3500)) await tgSend(env, chatId, part, replyTo);
+async function sendLinks(env: Env, chatId: number, title: string, urls: string[], replyTo?: number) {
+  const msg = buildLinksMessage(title, urls);
+  for (const part of chunkText(msg, 3500)) await tgSendText(env, chatId, part, replyTo);
 }
 
-function isDirectLike(status: string) {
-  return status === "stream" || status === "redirect" || status === "tunnel" || status === "success";
+type CobaltNewResponse =
+  | { status: "tunnel" | "redirect"; url: string; filename?: string }
+  | { status: "picker"; picker: Array<{ type: "photo" | "video" | "gif"; url: string; thumb?: string }>; audio?: string; audioFilename?: string }
+  | { status: "local-processing"; type?: string; service?: string; tunnel: string[]; output?: any; audio?: any; isHLS?: boolean }
+  | { status: "error"; error: { code: string; context?: any } };
+
+type CobaltOldResponse =
+  | { status: "stream" | "redirect" | "tunnel"; url: string; filename?: string; text?: string }
+  | { status: "picker"; picker: Array<{ type: "photo" | "video" | "audio"; url: string; thumb?: string }> }
+  | { status: "error"; text?: string; error?: any };
+
+function toBaseUrl(instance: string) {
+  const u = new URL(instance);
+  u.pathname = u.pathname.replace(/\/+$/, "");
+  return u.toString();
 }
 
-async function processCobaltResponse(env: Env, chatId: number, data: any, replyTo?: number) {
-  const status = String(data?.status ?? "");
+async function cobaltCallNew(instance: string, body: any) {
+  const base = toBaseUrl(instance);
+  const url = `${base}/`;
+  return fetchJson(url, {
+    method: "POST",
+    headers: { "Accept": "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  }, 35000);
+}
 
-  if (status === "error") throw new Error(String(data?.text ?? "error"));
-  if (status === "rate-limit") throw new Error("rate-limit");
+async function cobaltCallOld(instance: string, body: any) {
+  const base = toBaseUrl(instance);
+  const url = `${base}/api/json`;
+  return fetchJson(url, {
+    method: "POST",
+    headers: { "Accept": "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  }, 35000);
+}
 
-  if (isDirectLike(status) && data?.url) {
-    const u = String(data.url);
-    if (u && !looksLikeHls(u)) await tgSendVideo(env, chatId, u, "✅", replyTo);
-    await sendLinks(env, chatId, [u], replyTo);
-    return;
+async function trySendBestFile(env: Env, chatId: number, url: string, filename?: string, replyTo?: number) {
+  if (!url || looksLikeHls(url)) return false;
+
+  const e = ext(filename || url);
+  const cap = filename ? `<code>${escapeHtml(filename)}</code>` : "✅";
+
+  if (["jpg","jpeg","png","webp"].includes(e)) {
+    const ok = await tgSendPhoto(env, chatId, url, cap, replyTo);
+    if (ok) return true;
   }
 
-  if (status === "picker" && Array.isArray(data?.picker) && data.picker.length > 0) {
-    const items = data.picker.slice(0, 10);
-    const urls = items.map((x: any) => String(x?.url || "")).filter(Boolean);
-
-    for (const item of items) {
-      const u = String(item?.url || "");
-      if (!u) continue;
-      if (looksLikeHls(u)) continue;
-
-      if (item.type === "video") await tgSendVideo(env, chatId, u, "", replyTo);
-      else if (item.type === "photo") await tgSendPhoto(env, chatId, u, "", replyTo);
-      else if (item.type === "audio") await tgSendAudio(env, chatId, u, "", replyTo);
-    }
-
-    await sendLinks(env, chatId, urls, replyTo);
-    return;
+  if (["mp3","ogg","wav","opus","m4a","flac"].includes(e)) {
+    const ok = await tgSendAudio(env, chatId, url, cap, replyTo);
+    if (ok) return true;
   }
 
-  throw new Error("Unknown");
+  if (["mp4","mkv","webm","mov","gif"].includes(e) || !e) {
+    const okV = await tgSendVideo(env, chatId, url, cap, replyTo);
+    if (okV) return true;
+  }
+
+  const okD = await tgSendDocument(env, chatId, url, cap, replyTo);
+  if (okD) return true;
+
+  return false;
 }
 
 async function handleCobalt(env: Env, chatId: number, text: string, replyTo?: number) {
-  const urlMatch = text.match(/(https?:\/\/[^\s]+)/);
-  if (!urlMatch) return false;
+  const rawUrl = extractFirstUrl(text);
+  if (!rawUrl) return false;
 
-  let finalUrl = urlMatch[1];
-  let urlObj: URL;
-  try {
-    urlObj = new URL(finalUrl);
-  } catch {
-    return false;
-  }
+  const finalUrl = normalizeMediaUrl(rawUrl);
+  if (!finalUrl) return false;
 
-  const isTwitter = urlObj.hostname.includes("x.com") || urlObj.hostname.includes("twitter.com");
-  if (isTwitter) {
-    urlObj.hostname = "twitter.com";
-    urlObj.search = "";
-    finalUrl = urlObj.toString();
-  } else if (urlObj.hostname.includes("instagram.com")) {
-    urlObj.search = "";
-    finalUrl = urlObj.toString();
-  }
+  await tgChatAction(env, chatId, "upload_document");
 
-  const actRes = await fetch(`https://api.telegram.org/bot${env.TG_TOKEN}/sendChatAction`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, action: "upload_video" })
-  }).catch(() => null as any);
-  cancelBody(actRes);
+  const cobaltNewPayload: any = {
+    url: finalUrl,
+    videoQuality: "480",
+    youtubeVideoCodec: "h264",
+    downloadMode: "auto",
+    convertGif: true
+  };
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 60000);
+  const cobaltOldPayload: any = { url: finalUrl, vQuality: "480", vCodec: "h264" };
 
-  const payload1: any = { url: finalUrl, vCodec: "h264", vQuality: "480" };
-  const payload2: any = { url: finalUrl };
+  let lastErr = "";
 
-  for (const baseUrl of COBALT_INSTANCES) {
-    let endpoint = baseUrl;
-    if (!baseUrl.endsWith("json")) endpoint = baseUrl.endsWith("/") ? `${baseUrl}api/json` : `${baseUrl}/api/json`;
+  for (const inst of COBALT_INSTANCES) {
+    const r1 = await cobaltCallNew(inst, cobaltNewPayload);
+    if (r1.ok && r1.json && typeof r1.json?.status === "string") {
+      const data = r1.json as CobaltNewResponse;
+      const st = String((data as any).status);
 
-    try {
-      const res = await fetch(endpoint, {
-        method: "POST",
-        headers: { Accept: "application/json", "Content-Type": "application/json" },
-        body: JSON.stringify(payload1),
-        signal: controller.signal
-      });
-
-      if (res.ok) {
-        const data = await res.json<any>();
-        if (String(data?.status ?? "") === "rate-limit") continue;
-        clearTimeout(timeoutId);
-        await processCobaltResponse(env, chatId, data, replyTo);
-        return true;
-      } else {
-        cancelBody(res);
+      if (st === "error") {
+        lastErr = String((data as any)?.error?.code ?? "error");
+        continue;
       }
 
-      const res2 = await fetch(endpoint, {
-        method: "POST",
-        headers: { Accept: "application/json", "Content-Type": "application/json" },
-        body: JSON.stringify(payload2),
-        signal: controller.signal
-      });
-
-      if (res2.ok) {
-        const data2 = await res2.json<any>();
-        if (String(data2?.status ?? "") === "rate-limit") continue;
-        clearTimeout(timeoutId);
-        await processCobaltResponse(env, chatId, data2, replyTo);
+      if (st === "tunnel" || st === "redirect") {
+        const u = String((data as any).url || "");
+        const filename = (data as any).filename ? String((data as any).filename) : undefined;
+        await trySendBestFile(env, chatId, u, filename, replyTo);
+        await sendLinks(env, chatId, "🔗 لینک استخراج‌شده از Cobalt:", [u], replyTo);
         return true;
-      } else {
-        cancelBody(res2);
       }
-    } catch {}
+
+      if (st === "picker") {
+        const items = Array.isArray((data as any).picker) ? (data as any).picker.slice(0, 10) : [];
+        const urls = items.map((x: any) => String(x?.url || "")).filter(Boolean);
+
+        for (const it of items) {
+          const u = String(it?.url || "");
+          if (!u || looksLikeHls(u)) continue;
+          if (it.type === "photo") await tgSendPhoto(env, chatId, u, "", replyTo);
+          else if (it.type === "video" || it.type === "gif") await tgSendVideo(env, chatId, u, "", replyTo);
+        }
+
+        if ((data as any).audio) {
+          const au = String((data as any).audio);
+          const af = (data as any).audioFilename ? String((data as any).audioFilename) : "";
+          if (au && !looksLikeHls(au)) await tgSendAudio(env, chatId, au, af ? `<code>${escapeHtml(af)}</code>` : "", replyTo);
+          if (au) urls.unshift(au);
+        }
+
+        await sendLinks(env, chatId, "🔗 لینک استخراج‌شده از Cobalt:", urls, replyTo);
+        return true;
+      }
+
+      if (st === "local-processing") {
+        const tunnels = Array.isArray((data as any).tunnel) ? (data as any).tunnel.map((x: any) => String(x)).filter(Boolean) : [];
+        const msg = `⚠️ این لینک نیاز به پردازش محلی دارد (local-processing).\nفایل آماده‌ی مستقیم ندارد.\n\n🔗 لینک‌ها:`;
+        await tgSendText(env, chatId, msg, replyTo);
+        await sendLinks(env, chatId, "🔗 لینک استخراج‌شده از Cobalt:", tunnels, replyTo);
+        return true;
+      }
+
+      lastErr = `unknown-status:${st}`;
+      continue;
+    }
+
+    const r2 = await cobaltCallOld(inst, cobaltOldPayload);
+    if (r2.ok && r2.json && typeof r2.json?.status === "string") {
+      const data2 = r2.json as CobaltOldResponse;
+      const st2 = String((data2 as any).status);
+
+      if (st2 === "error") {
+        lastErr = String((data2 as any)?.text ?? "error");
+        continue;
+      }
+
+      if (st2 === "stream" || st2 === "redirect" || st2 === "tunnel") {
+        const u = String((data2 as any).url || "");
+        const filename = (data2 as any).filename ? String((data2 as any).filename) : undefined;
+        await trySendBestFile(env, chatId, u, filename, replyTo);
+        await sendLinks(env, chatId, "🔗 لینک استخراج‌شده از Cobalt:", [u], replyTo);
+        return true;
+      }
+
+      if (st2 === "picker") {
+        const items = Array.isArray((data2 as any).picker) ? (data2 as any).picker.slice(0, 10) : [];
+        const urls = items.map((x: any) => String(x?.url || "")).filter(Boolean);
+
+        for (const it of items) {
+          const u = String(it?.url || "");
+          if (!u || looksLikeHls(u)) continue;
+          if (it.type === "photo") await tgSendPhoto(env, chatId, u, "", replyTo);
+          else if (it.type === "video") await tgSendVideo(env, chatId, u, "", replyTo);
+          else if (it.type === "audio") await tgSendAudio(env, chatId, u, "", replyTo);
+        }
+
+        await sendLinks(env, chatId, "🔗 لینک استخراج‌شده از Cobalt:", urls, replyTo);
+        return true;
+      }
+
+      lastErr = `unknown-old-status:${st2}`;
+      continue;
+    }
+
+    lastErr = r1.text || r2.text || lastErr;
   }
 
-  clearTimeout(timeoutId);
-  await tgSend(env, chatId, `❌`, replyTo);
+  await tgSendText(env, chatId, `❌\n🔗 لینک ورودی:\n<code>${escapeHtml(finalUrl)}</code>${lastErr ? `\n\n<code>${escapeHtml(lastErr)}</code>` : ""}`, replyTo);
   return true;
 }
 
@@ -579,7 +657,7 @@ export default {
     const update = await req.json<any>().catch(() => null);
     const msg = update?.message ?? update?.edited_message;
     const chatId: number | undefined = msg?.chat?.id;
-    const text: string | undefined = msg?.text;
+    const text: string | undefined = (msg?.text ?? msg?.caption);
     const messageId: number | undefined = msg?.message_id;
 
     if (!chatId || !text) return new Response("ok");
@@ -590,26 +668,19 @@ export default {
     const replyTo = isGroup ? messageId : undefined;
 
     const run = async () => {
-      const isUrl = /(https?:\/\/[^\s]+)/.test(text);
-      if (isUrl) {
+      if (/(https?:\/\/[^\s]+)/.test(text)) {
         const handled = await handleCobalt(env, chatId, text, replyTo);
         if (handled) return;
       }
 
-      if (cmd === "/start" || cmd === "/help") {
-        await tgSend(env, chatId, helpText(), replyTo);
-        return;
-      }
+      if (cmd === "/start" || cmd === "/help") { await tgSendText(env, chatId, helpText(), replyTo); return; }
 
       if (cmd === "/refresh") {
         const parts = stripPunct(textNorm).split(/\s+/).filter(Boolean);
         const key = parts[1] || "";
-        if (!env.ADMIN_KEY || key !== env.ADMIN_KEY) {
-          await tgSend(env, chatId, "⛔️", replyTo);
-          return;
-        }
+        if (!env.ADMIN_KEY || key !== env.ADMIN_KEY) { await tgSendText(env, chatId, "⛔️", replyTo); return; }
         const r = await refreshRates(env);
-        await tgSend(env, chatId, r.ok ? "✅" : "⛔️", replyTo);
+        await tgSendText(env, chatId, r.ok ? "✅" : "⛔️", replyTo);
         return;
       }
 
@@ -617,7 +688,7 @@ export default {
 
       if (cmd === "/all") {
         const out = buildAll(stored);
-        for (const c of chunkText(out)) await tgSend(env, chatId, c, replyTo);
+        for (const c of chunkText(out)) await tgSendText(env, chatId, c, replyTo);
         return;
       }
 
@@ -629,7 +700,7 @@ export default {
       if (!r) return;
 
       const out = r.kind === "gold" ? replyGold(r, amount, stored) : replyCurrency(r, amount);
-      await tgSend(env, chatId, out, replyTo);
+      await tgSendText(env, chatId, out, replyTo);
     };
 
     ctx.waitUntil(run());
