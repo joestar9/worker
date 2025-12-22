@@ -394,9 +394,7 @@ async function handleCobalt(env: Env, chatId: number, text: string, replyTo?: nu
 
   for (const baseUrl of COBALT_INSTANCES) {
     try {
-      // Try root
       let endpoint = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
-      // If base ends in /api/json, use that.
       if (baseUrl.includes("api/json")) endpoint = baseUrl;
 
       let res = await fetch(endpoint, {
