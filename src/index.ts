@@ -899,7 +899,6 @@ export default {
         await tgEditMessage(env, chatId, messageId, text, kb);
         return new Response("ok");
       } else if (data === "get_all_prices") {
-        // Backward-compat (older buttons): show category selector
         await tgAnswerCallback(env, cb.id);
         await tgEditMessage(env, chatId, messageId, "📌 یک دسته‌بندی را انتخاب کنید:", START_KEYBOARD);
         return new Response("ok");
@@ -942,7 +941,7 @@ export default {
       }
 
       if (cmd === "/start") {
-        await tgSend(env, chatId, "👋 سلام! به ربات جعبه‌ابزار خوش آمدید.\n\nمن می‌توانم قیمت ارزها و کریپتو را بگویم و ویدیوهای اینستاگرام را دانلود کنم.", replyTo, START_KEYBOARD);
+        await tgSend(env, chatId, "👋 سلام! به ربات [ارز چی؟] خوش آمدید.\n\nمن می‌توانم قیمت ارزها و کریپتو را بگویم و ویدیوهای اینستاگرام را دانلود کنم.", replyTo, START_KEYBOARD);
         return;
       }
       
