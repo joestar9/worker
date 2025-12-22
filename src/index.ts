@@ -8,16 +8,15 @@ export interface Env {
 const PRICES_URL = "https://raw.githubusercontent.com/joestar9/jojo/refs/heads/main/prices.json";
 
 const COBALT_INSTANCES = [
-  "https://api.cobalt.tools",
-  "https://blossom.imput.net",
-  "https://capi.3kh0.net",
-  "https://cobalt-api.kwiatekmiki.com",
+  "https://nuko-c.meowing.de",
   "https://cobalt-api.meowing.de",
   "https://cobalt-backend.canine.tools",
-  "https://kityune.imput.net",
+  "https://capi.3kh0.net",
+  "https://cobalt-api.kwiatekmiki.com",
   "https://nachos.imput.net",
-  "https://nuko-c.meowing.de",
-  "https://sunny.imput.net"
+  "https://sunny.imput.net",
+  "https://blossom.imput.net",
+  "https://kityune.imput.net"
 ];
 
 const KEY_RATES = "rates:latest";
@@ -177,23 +176,22 @@ async function fetchPricesFromGithub(env: Env): Promise<{ stored: Stored; rawHas
   if (etag) headers["if-none-match"] = etag;
 
   const res = await fetch(PRICES_URL, { method: "GET", headers });
+  const text = await res.text().catch(() => "");
 
   if (res.status === 304) {
-    const txt = await env.BOT_KV.get(KEY_RATES);
-    if (txt) {
-      const stored = JSON.parse(txt) as Stored;
+    const cached = await env.BOT_KV.get(KEY_RATES);
+    if (cached) {
+      const stored = JSON.parse(cached) as Stored;
       const rawHash = await sha256Hex(JSON.stringify(stored.rates));
       return { stored, rawHash };
     }
   }
-  if (!res.ok) {
-    const t = await res.text().catch(() => "");
-    throw new Error(`GitHub HTTP ${res.status} ${t.slice(0, 160)}`);
-  }
+  if (!res.ok) throw new Error(`GitHub HTTP ${res.status} ${text.slice(0, 160)}`);
+
   const newEtag = res.headers.get("etag");
   if (newEtag) await env.BOT_KV.put(KEY_ETAG, newEtag);
 
-  const json = await res.json();
+  const json = JSON.parse(text);
   const stored = normalizeRatesJson(json);
   const rawHash = await sha256Hex(JSON.stringify(stored.rates));
   return { stored, rawHash };
@@ -247,8 +245,7 @@ function parsePersianNumberUpTo100(tokens: string[]): number | null {
 function findCode(textNorm: string) {
   const cleaned = stripPunct(textNorm).replace(/\s+/g, " ").trim();
   const compact = cleaned.replace(/\s+/g, "");
-  const keys = ALIASES.flatMap(a => a.keys.map(k => ({ k: norm(k).replace(/\s+/g, ""), code: a.code })))
-    .sort((x, y) => y.k.length - x.k.length);
+  const keys = ALIASES.flatMap(a => a.keys.map(k => ({ k: norm(k).replace(/\s+/g, ""), code: a.code }))).sort((x, y) => y.k.length - x.k.length);
 
   for (const it of keys) {
     if (compact.includes(it.k)) return it.code;
@@ -282,172 +279,302 @@ function normalizeCommand(textNorm: string) {
   return first.split("@")[0];
 }
 
-async function tgSend(env: Env, chatId: number, text: string, replyTo?: number) {
-  const url = `https://api.telegram.org/bot${env.TG_TOKEN}/sendMessage`;
+function escapeHtml(s: string) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function cancelBody(res: Response | null | undefined) {
+  try { res?.body?.cancel(); } catch {}
+}
+
+async function fetchText(url: string, init: RequestInit, timeoutMs: number) {
+  const controller = new AbortController();
+  const t0 = Date.now();
+  const to = setTimeout(() => controller.abort(), timeoutMs);
+  let res: Response | null = null;
+  try {
+    res = await fetch(url, { ...init, signal: controller.signal });
+    const text = await res.text().catch(() => "");
+    return { ok: res.ok, status: res.status, ms: Date.now() - t0, text, headers: res.headers };
+  } catch (e: any) {
+    cancelBody(res);
+    return { ok: false, status: 0, ms: Date.now() - t0, text: String(e?.message ?? e ?? ""), headers: new Headers() };
+  } finally {
+    clearTimeout(to);
+  }
+}
+
+async function tgCall(env: Env, method: string, body: any) {
+  const url = `https://api.telegram.org/bot${env.TG_TOKEN}/${method}`;
+  const r = await fetchText(
+    url,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) },
+    20000
+  );
+  let json: any = null;
+  try { json = r.text ? JSON.parse(r.text) : null; } catch { json = null; }
+  console.log("tg", method, { httpOk: r.ok, status: r.status, ms: r.ms, ok: json?.ok, desc: json?.description, err: json?.error_code });
+  return json;
+}
+
+async function tgSendText(env: Env, chatId: number, text: string, replyTo?: number) {
   const body: any = { chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true };
   if (replyTo) { body.reply_to_message_id = replyTo; body.allow_sending_without_reply = true; }
-  await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(() => {});
+  await tgCall(env, "sendMessage", body);
+}
+
+async function tgChatAction(env: Env, chatId: number, action: string) {
+  await tgCall(env, "sendChatAction", { chat_id: chatId, action });
 }
 
 async function tgSendVideo(env: Env, chatId: number, videoUrl: string, caption: string, replyTo?: number) {
-  const url = `https://api.telegram.org/bot${env.TG_TOKEN}/sendVideo`;
-  const body: any = { 
-    chat_id: chatId, 
-    video: videoUrl, 
-    caption: caption, 
-    parse_mode: "HTML"
-  };
+  const body: any = { chat_id: chatId, video: videoUrl, caption, parse_mode: "HTML" };
   if (replyTo) { body.reply_to_message_id = replyTo; body.allow_sending_without_reply = true; }
-  await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(() => {});
+  const j = await tgCall(env, "sendVideo", body);
+  return !!j?.ok;
 }
 
 async function tgSendPhoto(env: Env, chatId: number, photoUrl: string, caption: string, replyTo?: number) {
-  const url = `https://api.telegram.org/bot${env.TG_TOKEN}/sendPhoto`;
-  const body: any = { 
-    chat_id: chatId, 
-    photo: photoUrl, 
-    caption: caption, 
-    parse_mode: "HTML"
-  };
+  const body: any = { chat_id: chatId, photo: photoUrl, caption, parse_mode: "HTML" };
   if (replyTo) { body.reply_to_message_id = replyTo; body.allow_sending_without_reply = true; }
-  await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(() => {});
+  const j = await tgCall(env, "sendPhoto", body);
+  return !!j?.ok;
 }
 
 async function tgSendAudio(env: Env, chatId: number, audioUrl: string, caption: string, replyTo?: number) {
-  const url = `https://api.telegram.org/bot${env.TG_TOKEN}/sendAudio`;
-  const body: any = { 
-    chat_id: chatId, 
-    audio: audioUrl, 
-    caption: caption, 
-    parse_mode: "HTML"
-  };
+  const body: any = { chat_id: chatId, audio: audioUrl, caption, parse_mode: "HTML" };
   if (replyTo) { body.reply_to_message_id = replyTo; body.allow_sending_without_reply = true; }
-  await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(() => {});
+  const j = await tgCall(env, "sendAudio", body);
+  return !!j?.ok;
 }
 
-async function processCobaltResponse(env: Env, chatId: number, data: any, replyTo?: number): Promise<{success: boolean; cobaltUrl: string}> {
-  if (data.status === "error") throw new Error(data.text);
-
-  let success = false;
-  let cobaltUrl = data.url || "";
-
-  if (data.status === "stream" || data.status === "redirect") {
-    try {
-      await tgSendVideo(env, chatId, data.url, `✅`, replyTo);
-      success = true;
-    } catch (error) {
-      await tgSend(env, chatId, `🔗 لینک مستقیم:\n${data.url}`, replyTo);
-      success = true;
-    }
-  } 
-  else if (data.status === "picker" && data.picker && data.picker.length > 0) {
-    const items = data.picker.slice(0, 3);
-    
-    for (const item of items) {
-      try {
-        if (item.type === "video" || item.type === "gif") {
-          await tgSendVideo(env, chatId, item.url, ``, replyTo);
-        } else if (item.type === "photo") {
-          await tgSendPhoto(env, chatId, item.url, ``, replyTo);
-        } else if (item.type === "audio") {
-          await tgSendAudio(env, chatId, item.url, ``, replyTo);
-        }
-        success = true;
-      } catch (error) {
-        await tgSend(env, chatId, `🔗 لینک:\n${item.url}`, replyTo);
-        success = true;
-      }
-    }
-  }
-  
-  if (!success && data.url) {
-    cobaltUrl = data.url;
-  }
-  
-  return {success, cobaltUrl};
-}
-
-async function handleCobalt(env: Env, chatId: number, text: string, replyTo?: number) {
-  const urlMatch = text.match(/(https?:\/\/[^\s]+)/);
-  if (!urlMatch) return false;
-
-  let finalUrl = urlMatch[1];
-
-  await fetch(`https://api.telegram.org/bot${env.TG_TOKEN}/sendChatAction`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, action: "upload_video" })
-  });
-
-  const isTwitter = /(x\.com|twitter\.com)/i.test(finalUrl);
-  const payload: any = { url: finalUrl, downloadMode: "redirect", vQuality: "max" };
-  if (isTwitter) {
-    payload.tweetMode = "extended";
-    finalUrl = finalUrl.replace("x.com", "twitter.com");
-    payload.url = finalUrl;
-  }
-
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 30000);
-
-  let lastError = "";
-  let cobaltUrl = "";
-
-  for (const baseUrl of COBALT_INSTANCES) {
-    let response: Response | null = null;
-    try {
-      const endpoint = baseUrl;
-      
-      response = await fetch(endpoint, {
-        method: "POST",
-        headers: { 
-          "Accept": "application/json",
-          "Content-Type": "application/json",
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        },
-        body: JSON.stringify(payload),
-        signal: controller.signal
-      });
-
-      if (!response.ok) {
-        await response.text().catch(() => {});
-        lastError = `Instance returned ${response.status}`;
-        continue;
-      }
-
-      const data = await response.json();
-      const result = await processCobaltResponse(env, chatId, data, replyTo);
-      cobaltUrl = result.cobaltUrl;
-      
-      if (result.success) {
-        clearTimeout(timeoutId);
-        return true;
-      }
-
-    } catch (e: any) {
-      if (response && response.body) {
-        await response.body.cancel().catch(() => {});
-      }
-      lastError = e.message || String(e);
-      continue;
-    }
-  }
-  
-  clearTimeout(timeoutId);
-  
-  if (cobaltUrl) {
-    await tgSend(env, chatId, `🔗 لینک مستقیم:\n${cobaltUrl}`, replyTo);
-  } else {
-    await tgSend(env, chatId, `❌ خطا در دانلود.\nآخرین خطا: ${lastError || "نامشخص"}`, replyTo);
-  }
-  
-  return true;
+async function tgSendDocument(env: Env, chatId: number, docUrl: string, caption: string, replyTo?: number) {
+  const body: any = { chat_id: chatId, document: docUrl, caption, parse_mode: "HTML" };
+  if (replyTo) { body.reply_to_message_id = replyTo; body.allow_sending_without_reply = true; }
+  const j = await tgCall(env, "sendDocument", body);
+  return !!j?.ok;
 }
 
 function chunkText(s: string, maxLen = 3500) {
   const out: string[] = [];
   for (let i = 0; i < s.length; i += maxLen) out.push(s.slice(i, i + maxLen));
   return out;
+}
+
+function extractFirstUrl(text: string) {
+  const m = text.match(/(https?:\/\/[^\s]+)/i);
+  return m ? m[1] : null;
+}
+
+function normalizeMediaUrl(inputUrl: string) {
+  let u: URL;
+  try { u = new URL(inputUrl); } catch { return null; }
+  if (u.hostname.includes("x.com")) u.hostname = "twitter.com";
+  if (u.hostname.includes("twitter.com") || u.hostname.includes("instagram.com")) u.search = "";
+  return u.toString();
+}
+
+function looksLikeHls(u: string) {
+  const x = u.toLowerCase();
+  return /\.m3u8(\?|$)/i.test(x) || x.includes("m3u8");
+}
+
+function ext(u: string) {
+  const q = u.split("?")[0];
+  const m = q.match(/\.([a-z0-9]{2,5})$/i);
+  return m ? m[1].toLowerCase() : "";
+}
+
+function buildLinksMessage(title: string, urls: string[]) {
+  const lines = urls.slice(0, 20).map((u, i) => `${i + 1}) <code>${escapeHtml(u)}</code>`);
+  return `${title}\n${lines.join("\n")}`;
+}
+
+async function sendLinks(env: Env, chatId: number, title: string, urls: string[], replyTo?: number) {
+  const msg = buildLinksMessage(title, urls);
+  for (const part of chunkText(msg, 3500)) await tgSendText(env, chatId, part, replyTo);
+}
+
+async function trySendBestFile(env: Env, chatId: number, url: string, filename?: string, replyTo?: number) {
+  if (!url || looksLikeHls(url)) return false;
+
+  const e = ext(filename || url);
+  const cap = filename ? `<code>${escapeHtml(filename)}</code>` : "✅";
+
+  if (["jpg","jpeg","png","webp"].includes(e)) {
+    const ok = await tgSendPhoto(env, chatId, url, cap, replyTo);
+    if (ok) return true;
+  }
+
+  if (["mp3","ogg","wav","opus","m4a","flac"].includes(e)) {
+    const ok = await tgSendAudio(env, chatId, url, cap, replyTo);
+    if (ok) return true;
+  }
+
+  if (["mp4","mkv","webm","mov","gif"].includes(e) || !e) {
+    const okV = await tgSendVideo(env, chatId, url, cap, replyTo);
+    if (okV) return true;
+  }
+
+  const okD = await tgSendDocument(env, chatId, url, cap, replyTo);
+  if (okD) return true;
+
+  return false;
+}
+
+function toBaseUrl(instance: string) {
+  const u = new URL(instance);
+  u.pathname = u.pathname.replace(/\/+$/, "");
+  return u.toString();
+}
+
+async function cobaltNew(instance: string, payload: any) {
+  const base = toBaseUrl(instance);
+  const endpoint = `${base}/`;
+  console.log("cobalt_try_new", endpoint);
+  const r = await fetchText(endpoint, {
+    method: "POST",
+    headers: { "Accept": "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  }, 35000);
+  console.log("cobalt_res_new", { endpoint, ok: r.ok, status: r.status, ms: r.ms, body: r.text.slice(0, 500) });
+  return { endpoint, ...r };
+}
+
+async function cobaltOld(instance: string, payload: any) {
+  const base = toBaseUrl(instance);
+  const endpoint = `${base}/api/json`;
+  console.log("cobalt_try_old", endpoint);
+  const r = await fetchText(endpoint, {
+    method: "POST",
+    headers: { "Accept": "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  }, 35000);
+  console.log("cobalt_res_old", { endpoint, ok: r.ok, status: r.status, ms: r.ms, body: r.text.slice(0, 500) });
+  return { endpoint, ...r };
+}
+
+function safeJson(text: string) {
+  try { return text ? JSON.parse(text) : null; } catch { return null; }
+}
+
+async function handleCobalt(env: Env, chatId: number, text: string, replyTo?: number) {
+  const rawUrl = extractFirstUrl(text);
+  if (!rawUrl) return false;
+
+  const finalUrl = normalizeMediaUrl(rawUrl);
+  if (!finalUrl) return false;
+
+  await tgChatAction(env, chatId, "upload_document");
+
+  const payloadNew: any = {
+    url: finalUrl,
+    videoQuality: "480",
+    youtubeVideoCodec: "h264",
+    downloadMode: "auto",
+    convertGif: true
+  };
+
+  const payloadOld: any = { url: finalUrl, vQuality: "480", vCodec: "h264" };
+
+  let lastErr = "";
+
+  for (const inst of COBALT_INSTANCES) {
+    const r1 = await cobaltNew(inst, payloadNew);
+    const j1 = safeJson(r1.text);
+    if (r1.ok && j1?.status) {
+      const st = String(j1.status);
+      console.log("cobalt_status_new", { inst, status: st });
+
+      if (st === "error") {
+        lastErr = String(j1?.error?.code ?? j1?.text ?? "error");
+        continue;
+      }
+
+      if ((st === "tunnel" || st === "redirect") && j1?.url) {
+        const u = String(j1.url);
+        const filename = j1?.filename ? String(j1.filename) : undefined;
+        await trySendBestFile(env, chatId, u, filename, replyTo);
+        await sendLinks(env, chatId, "🔗 لینک استخراج‌شده از Cobalt:", [u], replyTo);
+        return true;
+      }
+
+      if (st === "picker" && Array.isArray(j1?.picker)) {
+        const items = j1.picker.slice(0, 10);
+        const urls = items.map((x: any) => String(x?.url || "")).filter(Boolean);
+
+        for (const it of items) {
+          const u = String(it?.url || "");
+          if (!u || looksLikeHls(u)) continue;
+          if (it.type === "photo") await tgSendPhoto(env, chatId, u, "", replyTo);
+          else await tgSendVideo(env, chatId, u, "", replyTo);
+        }
+
+        if (j1?.audio) {
+          const au = String(j1.audio);
+          if (au) urls.unshift(au);
+          if (au && !looksLikeHls(au)) await tgSendAudio(env, chatId, au, j1?.audioFilename ? `<code>${escapeHtml(String(j1.audioFilename))}</code>` : "", replyTo);
+        }
+
+        await sendLinks(env, chatId, "🔗 لینک استخراج‌شده از Cobalt:", urls, replyTo);
+        return true;
+      }
+
+      if (st === "local-processing") {
+        const tunnels = Array.isArray(j1?.tunnel) ? j1.tunnel.map((x: any) => String(x)).filter(Boolean) : [];
+        await tgSendText(env, chatId, `⚠️ local-processing\n🔗 لینک ورودی:\n<code>${escapeHtml(finalUrl)}</code>`, replyTo);
+        if (tunnels.length) await sendLinks(env, chatId, "🔗 لینک استخراج‌شده از Cobalt:", tunnels, replyTo);
+        return true;
+      }
+
+      lastErr = `unknown-status:${st}`;
+      continue;
+    }
+
+    const r2 = await cobaltOld(inst, payloadOld);
+    const j2 = safeJson(r2.text);
+    if (r2.ok && j2?.status) {
+      const st2 = String(j2.status);
+      console.log("cobalt_status_old", { inst, status: st2 });
+
+      if (st2 === "error") {
+        lastErr = String(j2?.text ?? j2?.error ?? "error");
+        continue;
+      }
+
+      if ((st2 === "stream" || st2 === "redirect" || st2 === "tunnel") && j2?.url) {
+        const u = String(j2.url);
+        const filename = j2?.filename ? String(j2.filename) : undefined;
+        await trySendBestFile(env, chatId, u, filename, replyTo);
+        await sendLinks(env, chatId, "🔗 لینک استخراج‌شده از Cobalt:", [u], replyTo);
+        return true;
+      }
+
+      if (st2 === "picker" && Array.isArray(j2?.picker)) {
+        const items = j2.picker.slice(0, 10);
+        const urls = items.map((x: any) => String(x?.url || "")).filter(Boolean);
+
+        for (const it of items) {
+          const u = String(it?.url || "");
+          if (!u || looksLikeHls(u)) continue;
+          if (it.type === "photo") await tgSendPhoto(env, chatId, u, "", replyTo);
+          else if (it.type === "video") await tgSendVideo(env, chatId, u, "", replyTo);
+          else if (it.type === "audio") await tgSendAudio(env, chatId, u, "", replyTo);
+        }
+
+        await sendLinks(env, chatId, "🔗 لینک استخراج‌شده از Cobalt:", urls, replyTo);
+        return true;
+      }
+
+      lastErr = `unknown-old-status:${st2}`;
+      continue;
+    }
+
+    lastErr = r1.text || r2.text || lastErr;
+  }
+
+  await tgSendText(env, chatId, `❌\n🔗 لینک ورودی:\n<code>${escapeHtml(finalUrl)}</code>${lastErr ? `\n\n<code>${escapeHtml(lastErr.slice(0, 400))}</code>` : ""}`, replyTo);
+  return true;
 }
 
 async function getStoredOrRefresh(env: Env, ctx: ExecutionContext): Promise<Stored> {
@@ -491,22 +618,13 @@ function replyGold(rGold: Rate, amount: number, stored: Stored) {
   if (usd) {
     const usdPer1 = usd.price / (usd.unit || 1);
     const totalUsd = totalToman / usdPer1;
-    return [
-      `💰 ${aStr} ${rGold.fa} = ${formatUSD(totalUsd)}$`,
-      `💶 ${formatToman(totalToman)} تومان`
-    ].join("\n");
+    return [`💰 ${aStr} ${rGold.fa} = ${formatUSD(totalUsd)}$`, `💶 ${formatToman(totalToman)} تومان`].join("\n");
   }
   return `💶 ${aStr} ${rGold.fa} = ${formatToman(totalToman)} تومان`;
 }
 
 function helpText() {
-  return [
-    "دستورات:",
-    "لینک (Instagram, Youtube, Twitter, Tiktok, SoundCloud, ...)",
-    "دلار، یورو، طلا",
-    "/all",
-    "/refresh <key>"
-  ].join("\n");
+  return ["دستورات:", "لینک (Instagram, Youtube, Twitter, Tiktok, SoundCloud, ...)", "دلار، یورو، طلا", "/all", "/refresh <key>"].join("\n");
 }
 
 export default {
@@ -538,8 +656,14 @@ export default {
     const update = await req.json<any>().catch(() => null);
     const msg = update?.message ?? update?.edited_message;
     const chatId: number | undefined = msg?.chat?.id;
-    const text: string | undefined = msg?.text;
+    const text: string | undefined = (msg?.text ?? msg?.caption);
     const messageId: number | undefined = msg?.message_id;
+
+    console.log("update_keys", Object.keys(update || {}));
+    console.log("has_message", !!msg);
+    console.log("chatId", chatId);
+    console.log("text", msg?.text);
+    console.log("caption", msg?.caption);
 
     if (!chatId || !text) return new Response("ok");
 
@@ -550,19 +674,20 @@ export default {
 
     const run = async () => {
       const isUrl = /(https?:\/\/[^\s]+)/.test(text);
+      console.log("isUrl", isUrl);
       if (isUrl) {
-          const handled = await handleCobalt(env, chatId, text, replyTo);
-          if (handled) return;
+        const handled = await handleCobalt(env, chatId, text, replyTo);
+        if (handled) return;
       }
 
-      if (cmd === "/start" || cmd === "/help") { await tgSend(env, chatId, helpText(), replyTo); return; }
+      if (cmd === "/start" || cmd === "/help") { await tgSendText(env, chatId, helpText(), replyTo); return; }
 
       if (cmd === "/refresh") {
         const parts = stripPunct(textNorm).split(/\s+/).filter(Boolean);
         const key = parts[1] || "";
-        if (!env.ADMIN_KEY || key !== env.ADMIN_KEY) { await tgSend(env, chatId, "⛔️", replyTo); return; }
+        if (!env.ADMIN_KEY || key !== env.ADMIN_KEY) { await tgSendText(env, chatId, "⛔️", replyTo); return; }
         const r = await refreshRates(env);
-        await tgSend(env, chatId, r.ok ? "✅" : "⛔️", replyTo);
+        await tgSendText(env, chatId, r.ok ? "✅" : "⛔️", replyTo);
         return;
       }
 
@@ -570,7 +695,7 @@ export default {
 
       if (cmd === "/all") {
         const out = buildAll(stored);
-        for (const c of chunkText(out)) await tgSend(env, chatId, c, replyTo);
+        for (const c of chunkText(out)) await tgSendText(env, chatId, c, replyTo);
         return;
       }
 
@@ -582,7 +707,7 @@ export default {
       if (!r) return;
 
       const out = r.kind === "gold" ? replyGold(r, amount, stored) : replyCurrency(r, amount);
-      await tgSend(env, chatId, out, replyTo);
+      await tgSendText(env, chatId, out, replyTo);
     };
 
     ctx.waitUntil(run());
