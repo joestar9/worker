@@ -5,37 +5,28 @@ export interface Env {
   ADMIN_KEY: string;
 }
 
-// --- CONFIGURATION ---
 const PRICES_URL = "https://raw.githubusercontent.com/joestar9/jojo/refs/heads/main/prices.json";
 
-// لیست هوشمند سرورهای کبالت
-// نکته: ما آدرس‌های API را دقیق وارد می‌کنیم.
-// سرورهای imput.net (رسمی) معمولاً حساس‌تر هستند، بنابراین در انتهای لیست قرار گرفتند.
 const COBALT_INSTANCES = [
-  // Community Instances (معمولاً محدودیت کمتری دارند و سریع‌ترند)
-  "https://cobalt-api.meowing.de",           // v10
-  "https://cobalt-backend.canine.tools",     // v10
-  "https://capi.3kh0.net",                   // v10
-  "https://cobalt-api.kwiatekmiki.com",      // v10
-  "https://downloadapi.stuff.solutions",     // v10
-  "https://co.wuk.sh/api/json",              // Old reliable (v7/v10 hybrid)
-  
-  // Official Processing Nodes (ممکن است نیاز به هدرهای خاص داشته باشند)
+  "https://cobalt-api.meowing.de",
+  "https://cobalt-backend.canine.tools",
+  "https://capi.3kh0.net",
+  "https://cobalt-api.kwiatekmiki.com",
+  "https://downloadapi.stuff.solutions",
+  "https://co.wuk.sh/api/json",
   "https://nachos.imput.net",
   "https://sunny.imput.net",
   "https://blossom.imput.net",
-  "https://kityune.imput.net",
+  "https://kityune.imput.net"
 ];
 
 const KEY_RATES = "rates:latest";
 const KEY_ETAG = "rates:etag";
 const KEY_HASH = "rates:hash";
 
-// --- TYPES ---
 type Rate = { price: number; unit: number; kind: "currency" | "gold"; title: string; emoji: string; fa: string };
 type Stored = { fetchedAtMs: number; source: string; timestamp?: string; rates: Record<string, Rate> };
 
-// --- CURRENCY DATA ---
 const META: Record<string, { emoji: string; fa: string }> = {
   usd: { emoji: "🇺🇸", fa: "دلار" },
   eur: { emoji: "🇪🇺", fa: "یورو" },
@@ -83,7 +74,6 @@ const ALIASES: Array<{ keys: string[]; code: string }> = [
   { keys: ["مثقال", "mithqal"], code: "gold_mithqal" }
 ];
 
-// --- HELPER FUNCTIONS ---
 function normalizeDigits(input: string) {
   const map: Record<string, string> = {
     "۰":"0","۱":"1","۲":"2","۳":"3","۴":"4","۵":"5","۶":"6","۷":"7","۸":"8","۹":"9",
@@ -181,7 +171,6 @@ function normalizeRatesJson(j: any): Stored {
   return { fetchedAtMs, source: "github", timestamp, rates };
 }
 
-// --- FETCHING LOGIC ---
 async function fetchPricesFromGithub(env: Env): Promise<{ stored: Stored; rawHash: string }> {
   const etag = await env.BOT_KV.get(KEY_ETAG);
   const headers: Record<string, string> = { "accept": "application/json" };
@@ -224,7 +213,6 @@ async function refreshRates(env: Env) {
   return { ok: true, changed, count: Object.keys(stored.rates).length, timestamp: stored.timestamp ?? null };
 }
 
-// --- PARSING & FORMATTING ---
 function parsePersianNumberUpTo100(tokens: string[]): number | null {
   const ones: Record<string, number> = { "یک":1,"یه":1,"دو":2,"سه":3,"چهار":4,"پنج":5,"شش":6,"شیش":6,"هفت":7,"هشت":8,"نه":9 };
   const teens: Record<string, number> = { "ده":10,"یازده":11,"دوازده":12,"سیزده":13,"چهارده":14,"پانزده":15,"شانزده":16,"هفده":17,"هجده":18,"نوزده":19 };
@@ -294,7 +282,6 @@ function normalizeCommand(textNorm: string) {
   return first.split("@")[0];
 }
 
-// --- TELEGRAM FUNCTIONS ---
 async function tgSend(env: Env, chatId: number, text: string, replyTo?: number) {
   const url = `https://api.telegram.org/bot${env.TG_TOKEN}/sendMessage`;
   const body: any = { chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true };
@@ -328,80 +315,6 @@ async function tgSendPhoto(env: Env, chatId: number, photoUrl: string, caption: 
     await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(() => {});
 }
 
-// --- COBALT API HANDLER (ROBUST MULTI-SERVER) ---
-async function handleInstagram(env: Env, chatId: number, text: string, replyTo?: number) {
-  const urlMatch = text.match(/(https?:\/\/(?:www\.)?instagram\.com\/[^\s]+)/);
-  if (!urlMatch) return false;
-
-  const targetUrl = urlMatch[1];
-  
-  await fetch(`https://api.telegram.org/bot${env.TG_TOKEN}/sendChatAction`, {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, action: "upload_video" })
-  });
-
-  let lastError = "";
-
-  for (const baseUrl of COBALT_INSTANCES) {
-      try {
-          // استراتژی هوشمند:
-          // برخی سرورها درخواست را در ریشه "/" می‌پذیرند (اکثر نسخه‌های جدید)
-          // برخی دیگر در "/json" یا "/api/json"
-          // برای اطمینان، ما هدرهای استاندارد JSON را می‌فرستیم که روی اکثر اینستنس‌ها کار می‌کند.
-          
-          // اگر URL با /json تمام نمی‌شود، ما فرض می‌کنیم Root API است.
-          const endpoint = baseUrl.endsWith("json") ? baseUrl : baseUrl; 
-          
-          const apiRes = await fetch(endpoint, {
-            method: "POST",
-            headers: { 
-              "Accept": "application/json",
-              "Content-Type": "application/json",
-              "User-Agent": "Mozilla/5.0 (compatible; TelegramBot/1.0)", // برای جلوگیری از مسدود شدن
-              "Origin": "https://cobalt.tools", // دور زدن برخی محدودیت‌های CORS/Referer
-              "Referer": "https://cobalt.tools/"
-            },
-            body: JSON.stringify({ 
-              url: targetUrl,
-              vCodec: "h264"
-            })
-          });
-
-          if (!apiRes.ok) {
-             // اگر 404 داد، شاید اندپوینت اشتباه است، سعی می‌کنیم /api/json را تست کنیم (فقط برای دامنه‌های اصلی)
-             if (apiRes.status === 404 && !baseUrl.includes("json")) {
-                 const retryUrl = baseUrl.endsWith("/") ? `${baseUrl}api/json` : `${baseUrl}/api/json`;
-                 const retryRes = await fetch(retryUrl, {
-                    method: "POST",
-                    headers: { "Accept": "application/json", "Content-Type": "application/json" },
-                    body: JSON.stringify({ url: targetUrl, vCodec: "h264" })
-                 });
-                 if (retryRes.ok) {
-                     // اگر دومی موفق بود، از آن استفاده کن
-                     const data = await retryRes.json<any>();
-                     await processCobaltResponse(env, chatId, data, replyTo);
-                     return true; 
-                 }
-             }
-             throw new Error(`HTTP ${apiRes.status}`);
-          }
-          
-          const data = await apiRes.json<any>();
-          await processCobaltResponse(env, chatId, data, replyTo);
-          return true; // موفقیت، خروج از حلقه
-
-      } catch (e: any) {
-          console.error(`Error on instance ${baseUrl}:`, e.message);
-          lastError = e.message;
-          // برو سرور بعدی...
-      }
-  }
-
-  await tgSend(env, chatId, `❌ سرورهای دانلود پاسخگو نیستند. لطفاً دقایقی دیگر تلاش کنید.`, replyTo);
-  return true;
-}
-
-// تابع کمکی برای پردازش پاسخ JSON
 async function processCobaltResponse(env: Env, chatId: number, data: any, replyTo?: number) {
     if (data.status === "error") throw new Error(data.text || "Cobalt Error");
 
@@ -419,7 +332,66 @@ async function processCobaltResponse(env: Env, chatId: number, data: any, replyT
     }
 }
 
-// --- MAIN LOGIC ---
+async function handleCobalt(env: Env, chatId: number, text: string, replyTo?: number) {
+  const urlMatch = text.match(/(https?:\/\/[^\s]+)/);
+  if (!urlMatch) return false;
+
+  const targetUrl = urlMatch[1];
+  
+  await fetch(`https://api.telegram.org/bot${env.TG_TOKEN}/sendChatAction`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, action: "upload_video" })
+  });
+
+  for (const baseUrl of COBALT_INSTANCES) {
+      try {
+          const endpoint = baseUrl.endsWith("json") ? baseUrl : baseUrl; 
+          
+          const apiRes = await fetch(endpoint, {
+            method: "POST",
+            headers: { 
+              "Accept": "application/json",
+              "Content-Type": "application/json",
+              "User-Agent": "Mozilla/5.0 (compatible; TelegramBot/1.0)",
+              "Origin": "https://cobalt.tools",
+              "Referer": "https://cobalt.tools/"
+            },
+            body: JSON.stringify({ 
+              url: targetUrl,
+              vCodec: "h264"
+            })
+          });
+
+          if (!apiRes.ok) {
+             if (apiRes.status === 404 && !baseUrl.includes("json")) {
+                 const retryUrl = baseUrl.endsWith("/") ? `${baseUrl}api/json` : `${baseUrl}/api/json`;
+                 const retryRes = await fetch(retryUrl, {
+                    method: "POST",
+                    headers: { "Accept": "application/json", "Content-Type": "application/json" },
+                    body: JSON.stringify({ url: targetUrl, vCodec: "h264" })
+                 });
+                 if (retryRes.ok) {
+                     const data = await retryRes.json<any>();
+                     await processCobaltResponse(env, chatId, data, replyTo);
+                     return true; 
+                 }
+             }
+             throw new Error(`HTTP ${apiRes.status}`);
+          }
+          
+          const data = await apiRes.json<any>();
+          await processCobaltResponse(env, chatId, data, replyTo);
+          return true;
+
+      } catch (e: any) {
+          console.error(`Error on instance ${baseUrl}:`, e.message);
+      }
+  }
+
+  await tgSend(env, chatId, `❌ خطا در دانلود.`, replyTo);
+  return true;
+}
+
 function chunkText(s: string, maxLen = 3500) {
   const out: string[] = [];
   for (let i = 0; i < s.length; i += maxLen) out.push(s.slice(i, i + maxLen));
@@ -477,12 +449,9 @@ function replyGold(rGold: Rate, amount: number, stored: Stored) {
 
 function helpText() {
   return [
-    "نمونه‌ها:",
-    "دلار",
-    "100 دلار",
-    "طلا",
-    "لینک اینستاگرام (برای دانلود)",
-    "",
+    "دستورات:",
+    "لینک (اینستاگرام، یوتیوب، توییتر و...)",
+    "دلار، یورو، طلا...",
     "/all",
     "/refresh <key>"
   ].join("\n");
@@ -528,10 +497,10 @@ export default {
     const replyTo = isGroup ? messageId : undefined;
 
     const run = async () => {
-      // 1. بررسی لینک اینستاگرام
-      if (text.includes("instagram.com")) {
-          const handled = await handleInstagram(env, chatId, text, replyTo);
-          if (handled) return; 
+      const isUrl = /(https?:\/\/[^\s]+)/.test(text);
+      if (isUrl) {
+          const handled = await handleCobalt(env, chatId, text, replyTo);
+          if (handled) return;
       }
 
       if (cmd === "/start" || cmd === "/help") { await tgSend(env, chatId, helpText(), replyTo); return; }
