@@ -1,7 +1,3 @@
-const COBALT_UA = "bonbast-telegram-worker/1.0 (+https://example.com)";
-const isCfHtml = (s: string) =>
-  /attention required! \| cloudflare/i.test(s) || /<title>\s*attention required/i.test(s) || /^\s*<!doctype html/i.test(s);
-
 export interface Env {
   BOT_KV: KVNamespace;
   TG_TOKEN: string;
@@ -22,6 +18,8 @@ const COBALT_INSTANCES = [
   "https://blossom.imput.net",
   "https://kityune.imput.net"
 ];
+
+const COBALT_UA = "bonbast-telegram-worker/1.0";
 
 const KEY_RATES = "rates:latest";
 const KEY_ETAG = "rates:etag";
@@ -291,6 +289,15 @@ function cancelBody(res: Response | null | undefined) {
   try { res?.body?.cancel(); } catch {}
 }
 
+function isCfHtml(s: string) {
+  if (!s) return false;
+  if (/attention required! \| cloudflare/i.test(s)) return true;
+  if (/<title>\s*attention required/i.test(s)) return true;
+  if (/cloudflare/i.test(s) && /challenge/i.test(s)) return true;
+  if (/^\s*<!doctype html/i.test(s)) return true;
+  return false;
+}
+
 async function fetchText(url: string, init: RequestInit, timeoutMs: number) {
   const controller = new AbortController();
   const t0 = Date.now();
@@ -317,7 +324,7 @@ async function tgCall(env: Env, method: string, body: any) {
   );
   let json: any = null;
   try { json = r.text ? JSON.parse(r.text) : null; } catch { json = null; }
-  console.log("tg", method, { httpOk: r.ok, status: r.status, ms: r.ms, ok: json?.ok, desc: json?.description, err: json?.error_code });
+  console.log("tg", method, JSON.stringify({ httpOk: r.ok, status: r.status, ms: r.ms, ok: json?.ok, desc: json?.description, err: json?.error_code }));
   return json;
 }
 
@@ -430,16 +437,22 @@ function toBaseUrl(instance: string) {
   return instance.replace(/\/+$/, "");
 }
 
-const r = await fetchText(endpoint, {
-  method: "POST",
-  headers: {
-    "Accept": "application/json",
-    "Content-Type": "application/json",
-    "User-Agent": COBALT_UA
-  },
-  body: JSON.stringify(payload)
-}, 35000);
-console.log("cobalt_res_new", JSON.stringify({ endpoint, ok: r.ok, status: r.status, ms: r.ms, body: r.text.slice(0, 300) }));
+async function cobaltNew(instance: string, payload: any) {
+  const base = toBaseUrl(instance);
+  const endpoint = `${base}/`;
+  console.log("cobalt_try_new", endpoint);
+  const r = await fetchText(endpoint, {
+    method: "POST",
+    headers: {
+      "Accept": "application/json",
+      "Content-Type": "application/json",
+      "User-Agent": COBALT_UA
+    },
+    body: JSON.stringify(payload)
+  }, 35000);
+  console.log("cobalt_res_new", JSON.stringify({ endpoint, ok: r.ok, status: r.status, ms: r.ms, body: r.text.slice(0, 300) }));
+  return { endpoint, ...r };
+}
 
 async function cobaltOld(instance: string, payload: any) {
   const base = toBaseUrl(instance);
@@ -447,10 +460,14 @@ async function cobaltOld(instance: string, payload: any) {
   console.log("cobalt_try_old", endpoint);
   const r = await fetchText(endpoint, {
     method: "POST",
-    headers: { "Accept": "application/json", "Content-Type": "application/json" },
+    headers: {
+      "Accept": "application/json",
+      "Content-Type": "application/json",
+      "User-Agent": COBALT_UA
+    },
     body: JSON.stringify(payload)
   }, 35000);
-  console.log("cobalt_res_old", { endpoint, ok: r.ok, status: r.status, ms: r.ms, body: r.text.slice(0, 500) });
+  console.log("cobalt_res_old", JSON.stringify({ endpoint, ok: r.ok, status: r.status, ms: r.ms, body: r.text.slice(0, 300) }));
   return { endpoint, ...r };
 }
 
@@ -481,10 +498,17 @@ async function handleCobalt(env: Env, chatId: number, text: string, replyTo?: nu
 
   for (const inst of COBALT_INSTANCES) {
     const r1 = await cobaltNew(inst, payloadNew);
+
+    if (isCfHtml(r1.text)) {
+      console.log("cobalt_block_new", JSON.stringify({ endpoint: r1.endpoint }));
+      lastErr = `CF_BLOCK new: ${r1.endpoint}`;
+      continue;
+    }
+
     const j1 = safeJson(r1.text);
     if (r1.ok && j1?.status) {
       const st = String(j1.status);
-      console.log("cobalt_status_new", { inst, status: st });
+      console.log("cobalt_status_new", JSON.stringify({ inst, status: st }));
 
       if (st === "error") {
         lastErr = String(j1?.error?.code ?? j1?.text ?? "error");
@@ -532,10 +556,17 @@ async function handleCobalt(env: Env, chatId: number, text: string, replyTo?: nu
     }
 
     const r2 = await cobaltOld(inst, payloadOld);
+
+    if (isCfHtml(r2.text)) {
+      console.log("cobalt_block_old", JSON.stringify({ endpoint: r2.endpoint }));
+      lastErr = `CF_BLOCK old: ${r2.endpoint}`;
+      continue;
+    }
+
     const j2 = safeJson(r2.text);
     if (r2.ok && j2?.status) {
       const st2 = String(j2.status);
-      console.log("cobalt_status_old", { inst, status: st2 });
+      console.log("cobalt_status_old", JSON.stringify({ inst, status: st2 }));
 
       if (st2 === "error") {
         lastErr = String(j2?.text ?? j2?.error ?? "error");
@@ -570,10 +601,15 @@ async function handleCobalt(env: Env, chatId: number, text: string, replyTo?: nu
       continue;
     }
 
-    lastErr = r1.text || r2.text || lastErr;
+    lastErr = lastErr || "no-json-response";
   }
 
-  await tgSendText(env, chatId, `❌\n🔗 لینک ورودی:\n<code>${escapeHtml(finalUrl)}</code>${lastErr ? `\n\n<code>${escapeHtml(lastErr.slice(0, 400))}</code>` : ""}`, replyTo);
+  await tgSendText(
+    env,
+    chatId,
+    `❌\n🔗 لینک ورودی:\n<code>${escapeHtml(finalUrl)}</code>\n\n<code>${escapeHtml(lastErr || "failed")}</code>`,
+    replyTo
+  );
   return true;
 }
 
@@ -675,6 +711,7 @@ export default {
     const run = async () => {
       const isUrl = /(https?:\/\/[^\s]+)/.test(text);
       console.log("isUrl", isUrl);
+
       if (isUrl) {
         const handled = await handleCobalt(env, chatId, text, replyTo);
         if (handled) return;
