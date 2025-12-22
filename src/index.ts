@@ -8,15 +8,15 @@ export interface Env {
 const PRICES_URL = "https://raw.githubusercontent.com/joestar9/jojo/refs/heads/main/prices.json";
 
 const COBALT_INSTANCES = [
-  "https://co.wuk.sh/api/json",
+  "https://nuko-c.meowing.de",
   "https://cobalt-api.meowing.de",
   "https://cobalt-backend.canine.tools",
-  "https://api.cobalt.tools/api/json",
-  "https://downloadapi.stuff.solutions",
-  "https://cobalt-api.kwiatekmiki.com",
   "https://capi.3kh0.net",
+  "https://cobalt-api.kwiatekmiki.com",
   "https://nachos.imput.net",
-  "https://sunny.imput.net"
+  "https://sunny.imput.net",
+  "https://blossom.imput.net",
+  "https://kityune.imput.net"
 ];
 
 const KEY_RATES = "rates:latest";
