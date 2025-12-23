@@ -211,49 +211,10 @@ async function sha256Hex(s: string) {
   return Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
-function toNum(v: any): number | null {
-  if (v == null) return null;
-  if (typeof v === "number" && Number.isFinite(v)) return v;
-  const s = String(v).replace(/,/g, "").trim();
-  const n = Number(s);
-  return Number.isFinite(n) ? n : null;
-}
-
 function unitFromString(s: string): number {
   const m = s.trim().match(/^(\d{1,4})/);
   const u = m ? Number(m[1]) : 1;
   return Number.isFinite(u) && u > 1 ? u : 1;
-}
-
-function parseCurrencyItem(name: string) {
-  const n = name.trim();
-  const m = n.match(/^([A-Z]{3})\s*(.*)$/);
-  if (!m) return null;
-  const code = m[1].toLowerCase();
-  const rest = (m[2] || "").trim();
-  const unit = rest ? unitFromString(rest) : 1;
-  return { code, rest, unit };
-}
-
-function parseCSV(text: string) {
-  const lines = text.split("\n");
-  const result = [];
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line) continue;
-    const parts = line.split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/);
-    if (parts.length < 6) continue;
-    const name = parts[1].replace(/"/g, "").trim();
-    const symbol = parts[2].replace(/"/g, "").trim().toLowerCase();
-    const priceStr = parts[5];
-    const changeStr = parts[9];
-    const price = parseFloat(priceStr);
-    const change = parseFloat(changeStr);
-    if (!isNaN(price) && symbol) {
-      result.push({ symbol, name, price, change });
-    }
-  }
-  return result;
 }
 
 async function fetchAndMergeData(env: Env): Promise<{ stored: Stored; rawHash: string }> {
@@ -602,23 +563,6 @@ function findCode(textNorm: string, rates: Record<string, Rate>) {
 
   return null;
 }
-function extractAmount(textNorm: string) {
-  const cleaned = stripPunct(textNorm).replace(/\s+/g, " ").trim();
-  const digitScaled = parseDigitsWithScale(cleaned);
-  if (digitScaled != null && digitScaled > 0) return digitScaled;
-
-  const tokens = cleaned.split(" ").filter(Boolean);
-  const maxWin = Math.min(tokens.length, 10);
-  for (let w = maxWin; w >= 1; w--) {
-    for (let i = 0; i + w <= tokens.length; i++) {
-      const n = parsePersianNumber(tokens.slice(i, i + w));
-      if (n != null && n > 0) return n;
-    }
-  }
-
-  return 1;
-}
-
 function extractAmountOrNull(textNorm: string): number | null {
   const cleaned = stripPunct(textNorm).replace(/\s+/g, " ").trim();
   const digitScaled = parseDigitsWithScale(cleaned);
@@ -913,11 +857,6 @@ function clampPage(page: number, totalPages: number) {
   return page;
 }
 
-function shortButtonText(s: string, max = 60) {
-  if (s.length <= max) return s;
-  return s.slice(0, max - 1) + "…";
-}
-
 function shortColText(s: string, max = 18) {
   const t = s.replace(/\s+/g, " ").trim();
   if (t.length <= max) return t;
@@ -1078,17 +1017,6 @@ function buildPriceDetailText(stored: Stored, category: PriceCategory, code: str
     "",
     `🕐 <b>بروزرسانی:</b> ${getUpdateTimeStr(stored)}`
   ].filter(Boolean).join("\n");
-}
-
-function buildDetailKeyboard(category: PriceCategory, page: number) {
-  return {
-    inline_keyboard: [
-      [
-        { text: "🔙 بازگشت", callback_data: `page:${category}:${page}` },
-        { text: "🏠 خانه", callback_data: "start_menu" }
-      ]
-    ]
-  };
 }
 
 function replyCurrency(r: Rate, amount: number, stored: Stored, hasAmount: boolean) {
