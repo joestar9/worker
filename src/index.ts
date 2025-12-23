@@ -390,15 +390,36 @@ async function fetchAndMergeData(env: Env): Promise<{ stored: Stored; rawHash: s
 
     let tomanPrice = priceNum;
     let usdPrice: number | undefined = undefined;
+    let change24h: number | undefined = undefined;
 
     if (typeof row.price === "number") {
       usdPrice = priceNum;
+      // 24h change may exist only for crypto rows (e.g. from GitHub JSON)
+      // Accept multiple common field names to be resilient to upstream changes.
+      const ch =
+        (row as any)?.percent_change_24h ??
+        (row as any)?.percentChange24h ??
+        (row as any)?.change_24h ??
+        (row as any)?.change24h ??
+        (row as any)?.pct_change_24h ??
+        (row as any)?.pctChange24h;
+      const chNum = parseNumberLoose(ch);
+      if (chNum != null) change24h = chNum;
+
       if (usdToman != null) {
         tomanPrice = priceNum * usdToman;
       }
       kind = "crypto";
     } else if (nameLower === "gold ounce" || nameLower === "pax gold" || nameLower === "tether gold") {
       usdPrice = priceNum;
+      const ch =
+        (row as any)?.percent_change_24h ??
+        (row as any)?.percentChange24h ??
+        (row as any)?.change_24h ??
+        (row as any)?.change24h;
+      const chNum = parseNumberLoose(ch);
+      if (chNum != null) change24h = chNum;
+
       if (usdToman != null) {
         tomanPrice = priceNum * usdToman;
       }
@@ -422,7 +443,8 @@ async function fetchAndMergeData(env: Env): Promise<{ stored: Stored; rawHash: s
       title: cleanName,
       emoji: meta.emoji,
       fa: meta.fa,
-      usdPrice
+      usdPrice,
+      change24h
     };
   }
 
