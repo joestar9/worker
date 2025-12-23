@@ -27,12 +27,6 @@ const COBALT_INSTANCES = [
 const KEY_RATES = "rates:v2:latest";
 const KEY_HASH = "rates:v2:hash";
 
-const PARSE_TTL_MS = 15000;
-const CONTEXT_TTL_MS = 60000;
-const PARSE_CACHE_MAX = 5000;
-const parseCache = new Map<string, { ts: number; code: string | null; amount: number; hasAmount: boolean }>();
-const userContext = new Map<number, { ts: number; code: string }>();
-
 type Rate = {
   price: number;
   unit: number;
@@ -86,71 +80,31 @@ const META: Record<string, { emoji: string; fa: string }> = {
   krw: { emoji: "🇰🇷", fa: "وون کره جنوبی" },
   gold_gram_18k: { emoji: "🥇", fa: "گرم طلا ۱۸" },
   gold_mithqal: { emoji: "⚖️", fa: "مثقال طلا" },
-  coin_emami: { emoji: "🪙", fa: "سکه امامی" },
-  coin_bahar: { emoji: "🪙", fa: "سکه بهار آزادی" },
-  coin_azadi: { emoji: "🪙", fa: "سکه آزادی" },
-  coin_half: { emoji: "🪙", fa: "نیم سکه" },
-  coin_half_azadi: { emoji: "🪙", fa: "نیم سکه" },
-  coin_quarter: { emoji: "🪙", fa: "ربع سکه" },
-  coin_quarter_azadi: { emoji: "🪙", fa: "ربع سکه" },
-  coin_gram: { emoji: "🪙", fa: "سکه گرمی" },
-  coin_gerami: { emoji: "🪙", fa: "سکه گرمی" }};
+  coin_emami: { emoji: "🌕", fa: "سکه امامی" },
+  coin_bahar: { emoji: "🌕", fa: "سکه بهار آزادی" },
+  coin_half: { emoji: "🌗", fa: "نیم سکه" },
+  coin_quarter: { emoji: "🌘", fa: "ربع سکه" },
+  coin_gram: { emoji: "🌑", fa: "سکه گرمی" }
+};
 
 const ALIASES: Array<{ keys: string[]; code: string }> = [
-  { keys: ["دلار", "دلارامریکا", "دلارآمریکا", "دلار امریکا", "usd", "us dollar", "dollar"], code: "usd" },
-  { keys: ["یورو", "eur", "euro"], code: "eur" },
-  { keys: ["پوند", "پوندانگلیس", "پوند انگلیس", "gbp", "britishpound"], code: "gbp" },
-  { keys: ["فرانک", "فرانکسوئیس", "فرانک سوئیس", "chf", "swissfranc"], code: "chf" },
-  { keys: ["دلارکانادا","دلار کانادا","دلارکانادایی","دلار کانادایی","دلارکاندا","دلار کاندا","cad","canadiandollar","canada","کاندایی"], code: "cad" },
-  { keys: ["دلاراسترالیا", "دلار استرالیا", "استرالیا", "aud", "australiandollar"], code: "aud" },
-  { keys: ["درهم", "درهمامارات", "درهم امارات", "امارات", "aed", "uaedirham"], code: "aed" },
-  { keys: ["لیر", "لیرترکیه", "لیر ترکیه", "ترکیه", "try", "turkishlira"], code: "try" },
-  { keys: ["ین", "ینژاپن", "ین ژاپن", "ژاپن", "jpy", "japaneseyen"], code: "jpy" },
-  { keys: ["یوان", "یوانچین", "یوان چین", "چین", "cny", "chineseyuan"], code: "cny" },
-  { keys: ["ریال عربستان", "ریالعربستان", "ریاض", "عربستان", "sar", "ksa", "saudiriyal"], code: "sar" },
-  { keys: ["افغانی", "افغان", "afn", "afghanafghani"], code: "afn" },
-  { keys: ["ریال عمان", "عمان", "omr", "omanirial"], code: "omr" },
-  { keys: ["ریال قطر", "قطر", "qar", "qataririyal"], code: "qar" },
-  { keys: ["دینارکویت", "دینار کویت", "کویت", "kwd", "kuwaitidinar"], code: "kwd" },
-  { keys: ["دیناربحرین", "دینار بحرین", "بحرین", "bhd", "bahrainidinar"], code: "bhd" },
-  { keys: ["دینارعراق", "دینار عراق", "عراق", "عراقی", "iqd", "iraqidinar", "دینارعراقی", "دینار عراقی", "iraq"], code: "iqd" },
-  { keys: ["کرونسوئد", "کرون سوئد", "سوئد", "sek", "swedishkrona"], code: "sek" },
-  { keys: ["کروننروژ", "کرون نروژ", "نروژ", "nok", "norwegiankrone"], code: "nok" },
-  { keys: ["کرون دانمارک", "دانمارک", "dkk", "danishkrone"], code: "dkk" },
-  { keys: ["روبل", "روبل روسیه", "روسیه", "rub", "russianruble"], code: "rub" },
-  { keys: ["بات", "بات تایلند", "تایلند", "thb", "thaibaht"], code: "thb" },
-  { keys: ["دلار سنگاپور", "سنگاپور", "sgd", "singaporedollar"], code: "sgd" },
-  { keys: ["دلار هنگ کنگ", "هنگکنگ", "hkd", "hongkongdollar"], code: "hkd" },
-  { keys: ["منات", "منات آذربایجان", "آذربایجان", "azn", "azerbaijanimanat"], code: "azn" },
-  { keys: ["درام", "درام ارمنستان", "ارمنستان", "amd", "armeniandram"], code: "amd" },
-  { keys: ["رینگیت", "مالزی", "myr", "ringgit"], code: "myr" },
-  { keys: ["روپیه هند", "هند", "inr", "indianrupee"], code: "inr" },
-
-  { keys: ["طلا", "gold", "گرم طلا", "گرمطلای18", "طلای18", "طلای ۱۸", "۱۸"], code: "gold_gram_18k" },
-  { keys: ["مثقال", "مثقالطلا", "mithqal"], code: "gold_mithqal" },
-  { keys: ["اونس", "انس", "اونس طلا", "goldounce", "ounce"], code: "gold_ounce" },
-  { keys: ["سکه", "coin", "سکه امامی", "امامی", "coin_emami"], code: "coin_emami" },
-  { keys: ["بهار", "بهار آزادی", "ازادی", "آزادی", "coin_azadi"], code: "coin_azadi" },
-  { keys: ["نیم سکه", "نیم", "½", "coin_half_azadi"], code: "coin_half_azadi" },
-  { keys: ["ربع سکه", "ربع", "¼", "coin_quarter_azadi"], code: "coin_quarter_azadi" },
-  { keys: ["گرمی", "سکه گرمی", "coin_gerami"], code: "coin_gerami" },
-
-  { keys: ["بیت", "بیتکوین", "بیت کوین", "btc", "bitcoin"], code: "btc" },
+  { keys: ["دلار", "usd", "تتر", "tether", "usdt"], code: "usd" },
+  { keys: ["یورو", "eur"], code: "eur" },
+  { keys: ["پوند", "gbp"], code: "gbp" },
+  { keys: ["درهم", "aed"], code: "aed" },
+  { keys: ["لیر", "try"], code: "try" },
+  { keys: ["افغانی", "afn"], code: "afn" },
+  { keys: ["طلا", "gold", "گرم طلا", "طلای ۱۸", "طلای18"], code: "gold_gram_18k" },
+  { keys: ["مثقال", "mithqal"], code: "gold_mithqal" },
+  { keys: ["سکه", "coin", "امامی"], code: "coin_emami" },
+  { keys: ["بیت", "بیتکوین", "btc", "bitcoin"], code: "btc" },
   { keys: ["اتریوم", "eth", "ethereum"], code: "eth" },
-  { keys: ["تتر", "usdt", "tether", "tetherusdt"], code: "usdt" },
-  { keys: ["بی ان بی", "bnb", "binance"], code: "bnb" },
-  { keys: ["ریپل", "xrp"], code: "xrp" },
-  { keys: ["یو اس دی سی", "usdc"], code: "usdc" },
-  { keys: ["سولانا", "sol", "solana"], code: "sol" },
-  { keys: ["ترون", "trx", "tron"], code: "trx" },
-  { keys: ["دوج", "دوج کوین", "doge", "dogecoin"], code: "doge" },
-  { keys: ["شیبا", "shib", "shiba"], code: "shib" },
-  { keys: ["پولکادات", "dot", "polkadot"], code: "dot" },
-  { keys: ["فایل کوین", "fil", "filecoin"], code: "fil" },
+  { keys: ["نات", "ناتکوین", "not", "notcoin"], code: "not" },
   { keys: ["تون", "ton", "toncoin"], code: "ton" },
-  { keys: ["چین لینک", "link", "chainlink"], code: "link" },
-  { keys: ["مونرو", "xmr", "monero"], code: "xmr" },
-  { keys: ["بیت کوین کش", "bch", "bitcoincash"], code: "bch" }
+  { keys: ["دوج", "doge", "dogecoin"], code: "doge" },
+  { keys: ["شیبا", "shib", "shiba"], code: "shib" },
+  { keys: ["ترون", "trx", "tron"], code: "trx" },
+  { keys: ["سولانا", "sol", "solana"], code: "sol" }
 ];
 
 function normalizeDigits(input: string) {
@@ -173,25 +127,6 @@ function norm(input: string) {
 function stripPunct(input: string) {
   return input.replace(/[.,!?؟؛:()[\]{}"'«»]/g, " ").replace(/\s+/g, " ").trim();
 }
-
-const ALIAS_INDEX: Array<{ code: string; spaced: string[]; compact: string[]; maxLen: number }> = (() => {
-  const mapped = ALIASES.map((a) => {
-    const spaced = a.keys
-      .map((k) => stripPunct(norm(String(k))).replace(/\s+/g, " ").trim())
-      .filter(Boolean);
-
-    const compact = spaced.map((k) => k.replace(/\s+/g, "")).filter(Boolean);
-
-    spaced.sort((x, y) => y.length - x.length);
-    compact.sort((x, y) => y.length - x.length);
-
-    const maxLen = Math.max(spaced[0]?.length ?? 0, compact[0]?.length ?? 0);
-    return { code: a.code, spaced, compact, maxLen };
-  });
-
-  mapped.sort((x, y) => y.maxLen - x.maxLen);
-  return mapped;
-})();
 
 function formatToman(n: number) {
   const x = Math.round(n);
@@ -283,12 +218,14 @@ async function fetchAndMergeData(env: Env): Promise<{ stored: Stored; rawHash: s
     }
     const s = String(v).trim();
     if (!s) return null;
+
     const cleaned = s.replace(/,/g, "");
     const n = Number(cleaned);
     return Number.isFinite(n) ? n : null;
   };
 
   const normalizeKeyFromTitle = (title: string) => {
+
     const cleaned = stripPunct(title.toLowerCase()).replace(/\s+/g, " ").trim();
     return cleaned.replace(/\s+/g, "");
   };
@@ -397,6 +334,7 @@ async function fetchAndMergeData(env: Env): Promise<{ stored: Stored; rawHash: s
       }
       kind = "crypto";
     } else if (nameLower === "gold ounce" || nameLower === "pax gold" || nameLower === "tether gold") {
+
       usdPrice = priceNum;
       if (usdToman != null) {
         tomanPrice = priceNum * usdToman;
@@ -442,209 +380,95 @@ async function refreshRates(env: Env) {
   return { ok: true, changed, count: Object.keys(stored.rates).length };
 }
 
-function parsePersianNumber(tokens: string[]): number | null {
-  const ones: Record<string, number> = {
-    "یک": 1, "یه": 1, "دو": 2, "سه": 3, "چهار": 4, "پنج": 5, "شش": 6, "شیش": 6, "هفت": 7, "هشت": 8, "نه": 9
-  };
-  const teens: Record<string, number> = {
-    "ده": 10, "یازده": 11, "دوازده": 12, "سیزده": 13, "چهارده": 14, "پانزده": 15, "شانزده": 16, "هفده": 17, "هجده": 18, "نوزده": 19
-  };
-  const tens: Record<string, number> = {
-    "بیست": 20, "سی": 30, "چهل": 40, "پنجاه": 50, "شصت": 60, "هفتاد": 70, "هشتاد": 80, "نود": 90
-  };
-  const hundreds: Record<string, number> = {
-    "صد": 100, "یکصد": 100,
-    "دویست": 200, "سیصد": 300, "چهارصد": 400, "پانصد": 500,
-    "ششصد": 600, "شیشصد": 600, "هفتصد": 700, "هشتصد": 800, "نهصد": 900
-  };
-  const scales: Record<string, number> = {
-    "هزار": 1e3,
-    "میلیون": 1e6,
-    "ملیون": 1e6,
-    "میلیارد": 1e9,
-    "بیلیون": 1e9,
-    "تریلیون": 1e12
-  };
-
-  const t = tokens
-    .map((x) => x.trim())
-    .filter((x) => x && x !== "و");
+function parsePersianNumberUpTo100(tokens: string[]): number | null {
+  const ones: Record<string, number> = { "یک":1,"یه":1,"دو":2,"سه":3,"چهار":4,"پنج":5,"شش":6,"شیش":6,"هفت":7,"هشت":8,"نه":9 };
+  const teens: Record<string, number> = { "ده":10,"یازده":11,"دوازده":12,"سیزده":13,"چهارده":14,"پانزده":15,"شانزده":16,"هفده":17,"هجده":18,"نوزده":19 };
+  const tens: Record<string, number> = { "بیست":20,"سی":30,"چهل":40,"پنجاه":50,"شصت":60,"هفتاد":70,"هشتاد":80,"نود":90 };
+  const t = tokens.filter(x => x && x !== "و");
   if (t.length === 0) return null;
-
-  let total = 0;
-  let current = 0;
-
-  const addSmall = (w: string) => {
-    if (hundreds[w] != null) {
-      current += hundreds[w];
-      return true;
-    }
-    if (teens[w] != null) {
-      current += teens[w];
-      return true;
-    }
-    if (tens[w] != null) {
-      current += tens[w];
-      return true;
-    }
-    if (ones[w] != null) {
-      current += ones[w];
-      return true;
-    }
-    if (w === "صد") {
-      current = (current || 1) * 100;
-      return true;
-    }
-    return false;
-  };
-
-  for (const w of t) {
-    if (scales[w] != null) {
-      const scale = scales[w];
-      const base = current || 1;
-      total += base * scale;
-      current = 0;
-      continue;
-    }
-    if (!addSmall(w)) {
-      return null;
-    }
+  const joined = t.join("").replace(/\s+/g, "");
+  if (joined === "یکصد" || t.join(" ") === "یک صد" || t[0] === "صد") return 100;
+  if (t.length === 1) {
+    if (teens[t[0]] != null) return teens[t[0]];
+    if (tens[t[0]] != null) return tens[t[0]];
+    if (ones[t[0]] != null) return ones[t[0]];
   }
-
-  total += current;
-  return total > 0 ? total : null;
-}
-
-function parseDigitsWithScale(text: string): number | null {
-  const t = normalizeDigits(text);
-  const m = t.match(/(\d+(?:\.\d+)?)(?:\s*(هزار|میلیون|ملیون|میلیارد|بیلیون|تریلیون|k|m|b))?/i);
-  if (!m) return null;
-  const num = Number(m[1]);
-  if (!Number.isFinite(num) || num <= 0) return null;
-  const suf = (m[2] || "").toLowerCase();
-  const mul = suf === "هزار" || suf === "k" ? 1e3
-    : (suf === "میلیون" || suf === "ملیون" || suf === "m") ? 1e6
-    : (suf === "میلیارد" || suf === "بیلیون" || suf === "b") ? 1e9
-    : suf === "تریلیون" ? 1e12
-    : 1;
-  return num * mul;
-}
-
-function escapeRegExp(s: string) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function hasBounded(haystack: string, needle: string) {
-  if (!needle) return false;
-  const re = new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(needle)}(?![\\p{L}\\p{N}])`, "iu");
-  return re.test(haystack);
+  if (t.length === 2) {
+    const a = t[0], b = t[1];
+    if (tens[a] != null && ones[b] != null) return tens[a] + ones[b];
+  }
+  let total = 0;
+  for (const w of t) {
+    if (teens[w] != null) return teens[w];
+    if (tens[w] != null) total += tens[w];
+    else if (ones[w] != null) total += ones[w];
+    else return null;
+  }
+  if (total >= 1 && total <= 100) return total;
+  return null;
 }
 
 function findCode(textNorm: string, rates: Record<string, Rate>) {
-  const cleaned = stripPunct(textNorm).replace(/\s+/g, " ").trim();
-  const compact = cleaned.replace(/\s+/g, "");
-
-  for (const a of ALIAS_INDEX) {
-    for (const k of a.spaced) {
-      if (hasBounded(cleaned, k)) return a.code;
+  const cleaned0 = stripPunct(textNorm).replace(/\s+/g, " ").trim();
+  const cleaned1 = stripSuffixesText(cleaned0);
+  const variants = cleaned1 && cleaned1 !== cleaned0 ? [cleaned0, cleaned1] : [cleaned0];
+  for (const cleaned of variants) {
+    const compact = cleaned.replace(/\s+/g, "");
+    const compact2 = stripSuffixToken(compact);
+    for (const a of ALIAS_INDEX) {
+      for (const k of a.spaced) {
+        if (hasBounded(cleaned, k)) return a.code;
+      }
+      for (const k of a.compact) {
+        if (hasBounded(compact, k) || (compact2 !== compact && hasBounded(compact2, k))) return a.code;
+      }
     }
-    for (const k of a.compact) {
-      if (hasBounded(compact, k)) return a.code;
+    if (hasBounded(cleaned, "دلار") && (hasBounded(cleaned, "کانادا") || hasBounded(cleaned, "کاندا") || hasBounded(cleaned, "کانادایی") || hasBounded(cleaned, "کاندایی"))) {
+      if (rates["cad"]) return "cad";
+    }
+    if (hasBounded(cleaned, "دینار") && (hasBounded(cleaned, "عراق") || hasBounded(cleaned, "عراقی"))) {
+      if (rates["iqd"]) return "iqd";
+    }
+    const m1 = cleaned.match(/\b([a-z]{3,10})\b/i);
+    if (m1) {
+      const candidate = m1[1].toLowerCase();
+      if (rates[candidate]) return candidate;
+    }
+    const tokens = cleaned.split(" ").map(stripSuffixToken).filter(Boolean);
+    for (const t of tokens) {
+      if (t.length < 3) continue;
+      const max = t.length <= 5 ? 1 : 2;
+      for (const f of FUZZ_INDEX) {
+        if (Math.abs(f.len - t.length) > max) continue;
+        const d = levenshteinMax(t, f.w, max);
+        if (d <= max) return f.code;
+      }
     }
   }
-
-  if (hasBounded(cleaned, "دلار") && (hasBounded(cleaned, "کانادا") || hasBounded(cleaned, "کاندا") || hasBounded(cleaned, "کانادایی") || hasBounded(cleaned, "کاندایی"))) {
-    if (rates["cad"]) return "cad";
-  }
-  if (hasBounded(cleaned, "دینار") && (hasBounded(cleaned, "عراق") || hasBounded(cleaned, "عراقی"))) {
-    if (rates["iqd"]) return "iqd";
-  }
-
-  const m = cleaned.match(/\b([a-z]{3,10})\b/i);
-  if (m) {
-    const candidate = m[1].toLowerCase();
-    if (rates[candidate]) return candidate;
-  }
-
+  const compactFinal = variants[variants.length - 1].replace(/\s+/g, "");
   for (const key in rates) {
     const t = rates[key]?.title ? stripPunct(norm(rates[key].title)).replace(/\s+/g, "") : "";
-    if (compact === key || (t && compact === t)) return key;
+    if (compactFinal === key || (t && compactFinal === t)) return key;
   }
-
   return null;
 }
+
 function extractAmount(textNorm: string) {
   const cleaned = stripPunct(textNorm).replace(/\s+/g, " ").trim();
-  const digitScaled = parseDigitsWithScale(cleaned);
-  if (digitScaled != null && digitScaled > 0) return digitScaled;
-
+  const numMatch = cleaned.match(/(\d+(?:\.\d+)?)/);
+  if (numMatch) {
+    const n = Number(numMatch[1]);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
   const tokens = cleaned.split(" ").filter(Boolean);
-  const maxWin = Math.min(tokens.length, 10);
-  for (let w = maxWin; w >= 1; w--) {
-    for (let i = 0; i + w <= tokens.length; i++) {
-      const n = parsePersianNumber(tokens.slice(i, i + w));
+  const win = tokens.slice(-7);
+  for (let i = 0; i < win.length; i++) {
+    for (let j = win.length; j > i; j--) {
+      const n = parsePersianNumberUpTo100(win.slice(i, j));
       if (n != null && n > 0) return n;
     }
   }
-
   return 1;
-}
-
-function extractAmountOrNull(textNorm: string): number | null {
-  const cleaned = stripPunct(textNorm).replace(/\s+/g, " ").trim();
-  const digitScaled = parseDigitsWithScale(cleaned);
-  if (digitScaled != null && digitScaled > 0) return digitScaled;
-
-  const tokens = cleaned.split(" ").filter(Boolean);
-  const maxWin = Math.min(tokens.length, 10);
-  for (let w = maxWin; w >= 1; w--) {
-    for (let i = 0; i + w <= tokens.length; i++) {
-      const n = parsePersianNumber(tokens.slice(i, i + w));
-      if (n != null && n > 0) return n;
-    }
-  }
-  return null;
-}
-
-function pruneParseCache(now: number) {
-  if (parseCache.size <= PARSE_CACHE_MAX) return;
-  const keys: string[] = [];
-  for (const [k, v] of parseCache) {
-    if (now - v.ts > PARSE_TTL_MS) keys.push(k);
-  }
-  for (const k of keys) parseCache.delete(k);
-  if (parseCache.size <= PARSE_CACHE_MAX) return;
-  let i = 0;
-  for (const k of parseCache.keys()) {
-    parseCache.delete(k);
-    i++;
-    if (parseCache.size <= PARSE_CACHE_MAX) break;
-    if (i > PARSE_CACHE_MAX) break;
-  }
-}
-
-function getParsedIntent(userId: number, textNorm: string, rates: Record<string, Rate>) {
-  const now = Date.now();
-  pruneParseCache(now);
-  const cacheKey = `${userId}:${textNorm}`;
-  const cached = parseCache.get(cacheKey);
-  if (cached && now - cached.ts <= PARSE_TTL_MS) return cached;
-
-  let code = findCode(textNorm, rates);
-  const amountOrNull = extractAmountOrNull(textNorm);
-  const hasAmount = amountOrNull != null;
-  let amount = amountOrNull ?? 1;
-
-  if (!code) {
-    const ctx = userContext.get(userId);
-    if (ctx && now - ctx.ts <= CONTEXT_TTL_MS && hasAmount) code = ctx.code;
-  }
-
-  if (code) userContext.set(userId, { ts: now, code });
-
-  const out = { ts: now, code: code ?? null, amount, hasAmount };
-  parseCache.set(cacheKey, out);
-  return out;
 }
 
 function normalizeCommand(textNorm: string) {
@@ -762,83 +586,33 @@ async function getStoredOrRefresh(env: Env, ctx: ExecutionContext): Promise<Stor
   return JSON.parse(txt2) as Stored;
 }
 
-function buildAll(stored: Stored, includeCrypto = true) {
+function buildAll(stored: Stored) {
   const rates = stored.rates;
   const codes = Object.keys(rates);
-
-  const goldCodes = new Set([
-    "gold_gram_18k",
-    "gold_mithqal",
-    "gold_ounce",
-    "coin_gerami",
-    "coin_gram",
-    "coin_azadi",
-    "coin_bahar",
-    "coin_emami",
-    "coin_half_azadi",
-    "coin_half",
-    "coin_quarter_azadi",
-    "coin_quarter"
-  ]);
-
-  const goldOrder = [
-    "coin_gerami",
-    "coin_gram",
-    "gold_gram_18k",
-    "gold_mithqal",
-    "coin_azadi",
-    "coin_bahar",
-    "coin_emami",
-    "coin_half_azadi",
-    "coin_half",
-    "coin_quarter_azadi",
-    "coin_quarter",
-    "gold_ounce"
-  ];
-
-  const fiatPriority = ["usd", "eur", "aed", "try", "afn", "iqd", "gbp", "amd", "aud", "azn", "bhd", "cad", "chf", "cny", "dkk", "hkd", "inr", "jpy", "kwd", "myr", "nok", "omr", "qar", "rub", "sar", "sek", "sgd", "thb"];
-
-  const cryptoPriority = ["btc", "eth", "ton", "usdt", "trx", "not", "doge", "sol", "bnb", "xrp", "usdc"];
 
   const goldItems: string[] = [];
   const currencyItems: string[] = [];
   const cryptoItems: string[] = [];
 
-  const safeFa = (code: string, r: Rate) => (META[code]?.fa ?? r.fa ?? r.title ?? code.toUpperCase());
-  const safeEmoji = (code: string, r: Rate) => (META[code]?.emoji ?? r.emoji ?? "💱");
-
-  const goldIndex = new Map<string, number>(goldOrder.map((c, i) => [c, i]));
-  const fiatIndex = new Map<string, number>(fiatPriority.map((c, i) => [c, i]));
-  const cryptoIndex = new Map<string, number>(cryptoPriority.map((c, i) => [c, i]));
+  const priority = ["usd", "eur", "aed", "try", "afn", "iqd", "gbp"];
+  const cryptoPriority = ["btc", "eth", "ton", "usdt", "trx", "not", "doge", "sol"];
 
   codes.sort((a, b) => {
     const rA = rates[a], rB = rates[b];
-    const isGoldA = goldCodes.has(a) || rA.kind === "gold";
-    const isGoldB = goldCodes.has(b) || rB.kind === "gold";
-    const isCryptoA = rA.kind === "crypto";
-    const isCryptoB = rB.kind === "crypto";
-
-    if (isGoldA !== isGoldB) return isGoldA ? -1 : 1;
-    if (isCryptoA !== isCryptoB) return isCryptoA ? 1 : -1;
-
-    if (isGoldA && isGoldB) {
-      const ia = goldIndex.get(a) ?? 9999;
-      const ib = goldIndex.get(b) ?? 9999;
-      if (ia !== ib) return ia - ib;
-      return safeFa(a, rA).localeCompare(safeFa(b, rB), "fa");
+    if (rA.kind !== rB.kind) return 0;
+    if (rA.kind === "currency") {
+      const idxA = priority.indexOf(a), idxB = priority.indexOf(b);
+      if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+      if (idxA !== -1) return -1;
+      if (idxB !== -1) return 1;
     }
-
-    if (isCryptoA && isCryptoB) {
-      const ia = cryptoIndex.get(a) ?? 9999;
-      const ib = cryptoIndex.get(b) ?? 9999;
-      if (ia !== ib) return ia - ib;
-      return a.localeCompare(b);
+    if (rA.kind === "crypto") {
+      const idxA = cryptoPriority.indexOf(a), idxB = cryptoPriority.indexOf(b);
+      if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+      if (idxA !== -1) return -1;
+      if (idxB !== -1) return 1;
     }
-
-    const ia = fiatIndex.get(a) ?? 9999;
-    const ib = fiatIndex.get(b) ?? 9999;
-    if (ia !== ib) return ia - ib;
-    return safeFa(a, rA).localeCompare(safeFa(b, rB), "fa");
+    return a.localeCompare(b);
   });
 
   for (const c of codes) {
@@ -846,20 +620,20 @@ function buildAll(stored: Stored, includeCrypto = true) {
     const per1 = Math.round(r.price / (r.unit || 1));
     const priceStr = formatToman(per1);
 
-    if (r.kind === "crypto") {
-      if (!includeCrypto) continue;
+        if (r.kind === "crypto") {
       const usdP = r.usdPrice != null ? formatUSD(r.usdPrice) : "?";
       const changePart = (typeof r.change24h === "number")
         ? ` | ${r.change24h >= 0 ? "🟢" : "🔴"} ${Math.abs(r.change24h).toFixed(1)}%`
         : "";
-      cryptoItems.push(`💎 <b>${r.fa}</b> (${c.toUpperCase()})
-└ ${priceStr} ت | ${usdP}$${changePart}`);
-      continue;
+      const line = `💎 <b>${r.fa}</b> (${c.toUpperCase()})
+└ ${priceStr} ت | ${usdP}$${changePart}`;
+      cryptoItems.push(line);
+    } else {
+      const meta = META[c] ?? { emoji: "💱", fa: (r.title || c.toUpperCase()) };
+      const line = `${meta.emoji} <b>${meta.fa}:</b> \u200E<code>${priceStr}</code> تومان`;
+      if (r.kind === "gold" || c.includes("coin") || c.includes("gold")) goldItems.push(line);
+      else currencyItems.push(line);
     }
-
-    const line = `${safeEmoji(c, r)} <b>${safeFa(c, r)}:</b> ‎<code>${priceStr}</code> تومان`;
-    if (goldCodes.has(c) || r.kind === "gold" || c.includes("coin") || c.includes("gold")) goldItems.push(line);
-    else currencyItems.push(line);
   }
 
   const lines: string[] = [];
@@ -875,10 +649,10 @@ function buildAll(stored: Stored, includeCrypto = true) {
     lines.push("💵 <b>نرخ ارزهای بازار</b>");
     lines.push("➖➖➖➖➖➖");
     lines.push(...currencyItems);
+    lines.push("");
   }
 
-  if (includeCrypto && cryptoItems.length > 0) {
-    lines.push("");
+  if (cryptoItems.length > 0) {
     lines.push("🚀 <b>بازار ارز دیجیتال</b>");
     lines.push("➖➖➖➖➖➖");
     lines.push(...cryptoItems);
@@ -886,11 +660,9 @@ function buildAll(stored: Stored, includeCrypto = true) {
 
   const date = new Date(stored.fetchedAtMs + (3.5 * 3600000));
   const timeStr = date.toISOString().substr(11, 5);
-  lines.push("");
-  lines.push("🕐 <b>بروزرسانی:</b> " + timeStr);
+  lines.push("\n🕐 <b>بروزرسانی:</b> " + timeStr);
 
-  return lines.join("
-");
+  return lines.join("\n");
 }
 
 const PRICE_PAGE_SIZE = 8;
@@ -918,6 +690,7 @@ const CRYPTO_META: Record<string, { emoji: string; fa: string }> = {
 };
 
 function getUpdateTimeStr(stored: Stored) {
+
   const date = new Date(stored.fetchedAtMs + (3.5 * 3600000));
   return date.toISOString().substr(11, 5);
 }
@@ -961,7 +734,7 @@ function buildPriceItems(stored: Stored, category: PriceCategory): PriceListItem
       const r = rates[c];
       const per1 = Math.round(r.price / (r.unit || 1));
       const toman = formatToman(per1);
-      const meta = CRYPTO_META[c] ?? { emoji: (r.emoji || "💎"), fa: c.toUpperCase() };
+      const meta = CRYPTO_META[c] ?? { emoji: (r.emoji || "💎"), fa: (r.fa || r.title || c.toUpperCase()) };
       items.push({
         code: c,
         category,
@@ -999,7 +772,7 @@ function buildPriceItems(stored: Stored, category: PriceCategory): PriceListItem
     const r = rates[c];
     const per1 = Math.round(r.price / (r.unit || 1));
     const priceStr = formatToman(per1);
-    const meta = META[c] ?? { emoji: "💱", fa: (r.fa || c.toUpperCase()) };
+    const meta = META[c] ?? { emoji: "💱", fa: (r.title || r.fa || c.toUpperCase()) };
     items.push({
       code: c,
       category,
@@ -1017,11 +790,19 @@ function buildPricesKeyboard(category: PriceCategory, page: number, totalPages: 
 
   const rows: Array<Array<{ text: string; callback_data: string }>> = [];
 
+  const headerRight = category === "crypto" ? "🪙 نام" : "💱 نام";
+  rows.push([
+    { text: "✨", callback_data: "noop" },
+    { text: "💰 قیمت", callback_data: "noop" },
+    { text: headerRight, callback_data: "noop" }
+  ]);
+
   for (const it of slice) {
     const cb = `show:${category}:${it.code}:${page}`;
     rows.push([
+      { text: it.emoji, callback_data: cb },
       { text: it.price, callback_data: cb },
-      { text: `${it.emoji} ${it.name}`, callback_data: cb }
+      { text: it.name, callback_data: cb }
     ]);
   }
 
@@ -1029,9 +810,9 @@ function buildPricesKeyboard(category: PriceCategory, page: number, totalPages: 
   const nextCb = page + 1 < totalPages ? `page:${category}:${page + 1}` : "noop";
 
   rows.push([
-    { text: "بعدی ⬅️", callback_data: nextCb },
+    { text: "⬅️ قبلی", callback_data: prevCb },
     { text: "🏠 خانه", callback_data: "start_menu" },
-    { text: "➡️ قبلی", callback_data: prevCb }
+    { text: "بعدی ➡️", callback_data: nextCb }
   ]);
 
   return { inline_keyboard: rows };
@@ -1107,8 +888,8 @@ function replyCurrency(r: Rate, amount: number) {
     return `💎 <b>${aStr} ${r.fa} (${r.title})</b>\n\n💵 قیمت دلاری: ${formatUSD(totalUsd)}$\n🇮🇷 قیمت تومانی: ${formatToman(total)} تومان`;
   }
 
-  if (amount <= 1) return `1 ${r.fa} = ${formatToman(per1)} تومان`;
-  return `${aStr} ${r.fa} = ${formatToman(total)} تومان`;
+  if (amount <= 1) return `1 ${r.fa} = \u200E<code>${formatToman(per1)}</code> تومان`;
+  return `${aStr} ${r.fa} = \u200E<code>${formatToman(total)}</code> تومان`;
 }
 
 function replyGold(rGold: Rate, amount: number, stored: Stored) {
@@ -1119,12 +900,9 @@ function replyGold(rGold: Rate, amount: number, stored: Stored) {
   if (usd) {
     const usdPer1 = usd.price / (usd.unit || 1);
     const totalUsd = totalToman / usdPer1;
-    return [
-      `💰 ${aStr} ${rGold.fa} = ${formatUSD(totalUsd)}$`,
-      `💶 ${formatToman(totalToman)} تومان`
-    ].join("\n");
+    return [`💰 ${aStr} ${rGold.fa} = ${formatUSD(totalUsd)}$`,`💶 \u200E<code>${formatToman(totalToman)}</code> تومان`].join("\n");
   }
-  return `💶 ${aStr} ${rGold.fa} = ${formatToman(totalToman)} تومان`;
+  return `💶 ${aStr} ${rGold.fa} = \u200E<code>${formatToman(totalToman)}</code> تومان`;
 }
 
 const START_KEYBOARD = {
@@ -1148,15 +926,71 @@ const HELP_KEYBOARD = {
   ]
 };
 
+function buildDisambiguation(textNorm: string, rates: Record<string, Rate>) {
+  const cleaned = stripSuffixesText(stripPunct(textNorm).replace(/\s+/g, " ").trim());
+  const has = (w: string) => hasBounded(cleaned, w);
+  if (has("دینار")) {
+    const opts = [
+      { code: "iqd", label: "🇮🇶 دینار عراق" },
+      { code: "kwd", label: "🇰🇼 دینار کویت" },
+      { code: "bhd", label: "🇧🇭 دینار بحرین" }
+    ].filter((o) => !!rates[o.code]);
+    if (opts.length >= 2) return { title: "منظورت کدوم دیناره؟", opts };
+  }
+  if (has("دلار")) {
+    const opts = [
+      { code: "usd", label: "🇺🇸 دلار آمریکا" },
+      { code: "cad", label: "🇨🇦 دلار کانادا" },
+      { code: "aud", label: "🇦🇺 دلار استرالیا" }
+    ].filter((o) => !!rates[o.code]);
+    if (opts.length >= 2) return { title: "منظورت کدوم دلاره؟", opts };
+  }
+  if (has("ریال")) {
+    const opts = [
+      { code: "sar", label: "🇸🇦 ریال عربستان" },
+      { code: "omr", label: "🇴🇲 ریال عمان" },
+      { code: "qar", label: "🇶🇦 ریال قطر" }
+    ].filter((o) => !!rates[o.code]);
+    if (opts.length >= 2) return { title: "منظورت کدوم ریاله؟", opts };
+  }
+  if (has("کرون")) {
+    const opts = [
+      { code: "sek", label: "🇸🇪 کرون سوئد" },
+      { code: "nok", label: "🇳🇴 کرون نروژ" },
+      { code: "dkk", label: "🇩🇰 کرون دانمارک" }
+    ].filter((o) => !!rates[o.code]);
+    if (opts.length >= 2) return { title: "منظورت کدوم کرونه؟", opts };
+  }
+  if (has("روپیه") || has("روپی")) {
+    const opts = [
+      { code: "inr", label: "🇮🇳 روپیه هند" },
+      { code: "pkr", label: "🇵🇰 روپیه پاکستان" }
+    ].filter((o) => !!rates[o.code]);
+    if (opts.length >= 2) return { title: "منظورت کدوم روپیه‌ست؟", opts };
+  }
+  return null;
+}
+
+function buildPickKeyboard(opts: Array<{ code: string; label: string }>) {
+  const rows: any[] = [];
+  let row: any[] = [];
+  for (const o of opts) {
+    row.push({ text: o.label, callback_data: `pick:${o.code}` });
+    if (row.length === 2) { rows.push(row); row = []; }
+  }
+  if (row.length) rows.push(row);
+  rows.push([{ text: "🏠 خانه", callback_data: "start_menu" }]);
+  return { inline_keyboard: rows };
+}
+
 function getHelpMessage() {
   return `<b>🤖 راهنمای استفاده از ربات:</b>
 
-1️⃣ <b>لیست ارز و طلا:</b> فقط کلمه <b>ارز</b> را بفرستید.
-2️⃣ <b>قیمت ارز:</b> نام ارز را بفرستید (دلار، یورو، افغانی).
-3️⃣ <b>کریپتو:</b> نام ارز دیجیتال را بفرستید (بیت کوین، اتریوم، BTC، TON).
-4️⃣ <b>تبدیل:</b> مقدار + نام ارز (مثلاً: ۱۰۰ دلار، 0.5 بیت کوین).
-5️⃣ <b>طلا و سکه:</b> کلمه «طلا»، «سکه» یا «مثقال» را بفرستید.
-6️⃣ <b>دانلود اینستاگرام:</b> لینک پست را بفرستید.
+1️⃣ <b>قیمت ارز:</b> نام ارز را بفرستید (دلار، یورو، افغانی).
+2️⃣ <b>کریپتو:</b> نام ارز دیجیتال را بفرستید (بیت کوین، اتریوم، BTC، TON).
+3️⃣ <b>تبدیل:</b> مقدار + نام ارز (مثلاً: ۱۰۰ دلار، 0.5 بیت کوین).
+4️⃣ <b>طلا و سکه:</b> کلمه «طلا»، «سکه» یا «مثقال» را بفرستید.
+5️⃣ <b>دانلود اینستاگرام:</b> لینک پست را بفرستید.
 
 🔸 قیمت‌های کریپتو هم به دلار و هم به تومان محاسبه می‌شوند.
 🔸 نرخ تتر/دلار از بازار آزاد گرفته می‌شود.`;
@@ -1213,7 +1047,7 @@ export default {
         const timeStr = getUpdateTimeStr(stored);
         const text = buildCategoryHeaderText(category, page, totalPages, timeStr);
         const kb = buildPricesKeyboard(category, page, totalPages, items);
-        if (chatId && messageId) await tgEditMessage(env, chatId, messageId, text, kb);
+        await tgEditMessage(env, chatId, messageId, text, kb);
         return new Response("ok");
       } else if (data?.startsWith("page:")) {
         const parts = data.split(":");
@@ -1234,11 +1068,23 @@ export default {
         const category = (parts[1] as any) as PriceCategory;
         const code = (parts[2] || "").toLowerCase();
         const page = parseInt(parts[3] || "0", 10) || 0;
-        await tgAnswerCallback(env, cb.id, "📩 ارسال شد");
+        await tgAnswerCallback(env, cb.id);
         const stored = await getStoredOrRefresh(env, ctx);
         const text = buildPriceDetailText(stored, category, code);
-        await tgSend(env, chatId, text);
+        const kb = buildDetailKeyboard(category, page);
+        await tgEditMessage(env, chatId, messageId, text, kb);
         return new Response("ok");
+} else if (data?.startsWith("pick:")) {
+  const code = (data.split(":")[1] || "").toLowerCase();
+  await tgAnswerCallback(env, cb.id);
+  const stored = await getStoredOrRefresh(env, ctx);
+  const r = stored.rates[code];
+  if (!r) return new Response("ok");
+  const out = r.kind === "gold" ? replyGold(r, 1, stored) : replyCurrency(r, 1);
+  const rt = cb.message?.chat?.type === "group" || cb.message?.chat?.type === "supergroup";
+  const rep = rt ? cb.message?.message_id : undefined;
+  await tgSend(env, chatId, out, rep);
+  return new Response("ok");
       } else if (data === "get_all_prices") {
         await tgAnswerCallback(env, cb.id);
         await tgEditMessage(env, chatId, messageId, "📌 یک دسته‌بندی را انتخاب کنید:", START_KEYBOARD);
@@ -1300,26 +1146,28 @@ export default {
         return;
       }
 
-      const only = stripPunct(textNorm).replace(/\s+/g, " ").trim();
-      if (only === "ارز") {
-        const stored = await getStoredOrRefresh(env, ctx);
-        const txt = buildAll(stored, false);
-        await tgSend(env, chatId, txt, replyTo);
+      const stored = await getStoredOrRefresh(env, ctx);
+
+      if (cmd === "/all") {
+        const out = buildAll(stored);
+        const chunks = chunkText(out, 3800);
+        for (const c of chunks) await tgSend(env, chatId, c, replyTo);
         return;
       }
 
-      const stored = await getStoredOrRefresh(env, ctx);
+const intent = getParsedIntent(userId, textNorm, stored.rates);
+if (!intent.code) {
+  const dis = buildDisambiguation(textNorm, stored.rates);
+  if (dis) await tgSend(env, chatId, dis.title, replyTo, buildPickKeyboard(dis.opts));
+  return;
+}
 
-      const parsed = getParsedIntent(userId, textNorm, stored.rates);
-      if (!parsed.code) return;
+const r = stored.rates[intent.code];
+if (!r) return;
 
-      const code = parsed.code;
-      const amount = parsed.amount;
-      const r = stored.rates[code];
-      if (!r) return;
-
-      const out = r.kind === "gold" ? replyGold(r, amount, stored) : replyCurrency(r, amount);
-      await tgSend(env, chatId, out, replyTo);
+const amount = intent.hasAmount ? intent.amount : 1;
+const out = r.kind === "gold" ? replyGold(r, amount, stored) : replyCurrency(r, amount);
+await tgSend(env, chatId, out, replyTo);
     };
 
     ctx.waitUntil(run());
