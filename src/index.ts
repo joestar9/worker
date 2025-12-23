@@ -33,15 +33,6 @@ const PARSE_CACHE_MAX = 5000;
 const parseCache = new Map<string, { ts: number; code: string | null; amount: number; hasAmount: boolean }>();
 const userContext = new Map<number, { ts: number; code: string }>();
 
-// تنظیمات واحدهای نمایش پیش‌فرض برای ارزهای کم‌ارزش
-const CUSTOM_UNITS: Record<string, number> = {
-  iqd: 100,  // دینار عراق (۱۰۰ تایی)
-  jpy: 100,  // ین ژاپن (۱۰۰ تایی)
-  amd: 10,   // درام ارمنستان (۱۰ تایی)
-  idr: 1000, // روپیه اندونزی (۱۰۰۰ تایی)
-  rub: 1,
-};
-
 type Rate = { 
   price: number; 
   unit: number; 
@@ -57,7 +48,6 @@ type Stored = {
   fetchedAtMs: number; 
   source: string; 
   timestamp?: string; 
-  usdToman: number; // اضافه شده برای محاسبه نرخ دلاری سایر ارزها
   rates: Record<string, Rate> 
 };
 
@@ -221,10 +211,49 @@ async function sha256Hex(s: string) {
   return Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
+function toNum(v: any): number | null {
+  if (v == null) return null;
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  const s = String(v).replace(/,/g, "").trim();
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+
 function unitFromString(s: string): number {
   const m = s.trim().match(/^(\d{1,4})/);
   const u = m ? Number(m[1]) : 1;
   return Number.isFinite(u) && u > 1 ? u : 1;
+}
+
+function parseCurrencyItem(name: string) {
+  const n = name.trim();
+  const m = n.match(/^([A-Z]{3})\s*(.*)$/);
+  if (!m) return null;
+  const code = m[1].toLowerCase();
+  const rest = (m[2] || "").trim();
+  const unit = rest ? unitFromString(rest) : 1;
+  return { code, rest, unit };
+}
+
+function parseCSV(text: string) {
+  const lines = text.split("\n");
+  const result = [];
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    const parts = line.split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/);
+    if (parts.length < 6) continue;
+    const name = parts[1].replace(/"/g, "").trim();
+    const symbol = parts[2].replace(/"/g, "").trim().toLowerCase();
+    const priceStr = parts[5];
+    const changeStr = parts[9];
+    const price = parseFloat(priceStr);
+    const change = parseFloat(changeStr);
+    if (!isNaN(price) && symbol) {
+      result.push({ symbol, name, price, change });
+    }
+  }
+  return result;
 }
 
 async function fetchAndMergeData(env: Env): Promise<{ stored: Stored; rawHash: string }> {
@@ -327,7 +356,7 @@ async function fetchAndMergeData(env: Env): Promise<{ stored: Stored; rawHash: s
     "cosmos": { code: "atom", kind: "crypto", fa: "کازماس", emoji: "💎" }
   };
 
-  let usdToman: number = 0;
+  let usdToman: number | null = null;
   for (const row of arr) {
     if (!row?.name) continue;
     const { cleanName } = extractUnitFromName(String(row.name));
@@ -364,16 +393,22 @@ async function fetchAndMergeData(env: Env): Promise<{ stored: Stored; rawHash: s
 
     if (typeof row.price === "number") {
       usdPrice = priceNum;
-      if (usdToman > 0) {
+      if (usdToman != null) {
         tomanPrice = priceNum * usdToman;
       }
       kind = "crypto";
     } else if (nameLower === "gold ounce" || nameLower === "pax gold" || nameLower === "tether gold") {
       usdPrice = priceNum;
-      if (usdToman > 0) {
+      if (usdToman != null) {
         tomanPrice = priceNum * usdToman;
       }
       kind = "crypto";
+    }
+
+    // If we have USD→Toman rate, also compute USD-equivalent for fiat currencies
+    if (kind === "currency" && usdToman != null) {
+      if (code === "usd") usdPrice = 1;
+      else usdPrice = tomanPrice / usdToman; // USD value for the reported unit
     }
 
     const meta = mapped
@@ -394,7 +429,6 @@ async function fetchAndMergeData(env: Env): Promise<{ stored: Stored; rawHash: s
   const stored: Stored = {
     fetchedAtMs,
     source: PRICES_JSON_URL,
-    usdToman,
     rates
   };
 
@@ -545,6 +579,22 @@ function findCode(textNorm: string, rates: Record<string, Rate>) {
   }
 
   return null;
+}
+function extractAmount(textNorm: string) {
+  const cleaned = stripPunct(textNorm).replace(/\s+/g, " ").trim();
+  const digitScaled = parseDigitsWithScale(cleaned);
+  if (digitScaled != null && digitScaled > 0) return digitScaled;
+
+  const tokens = cleaned.split(" ").filter(Boolean);
+  const maxWin = Math.min(tokens.length, 10);
+  for (let w = maxWin; w >= 1; w--) {
+    for (let i = 0; i + w <= tokens.length; i++) {
+      const n = parsePersianNumber(tokens.slice(i, i + w));
+      if (n != null && n > 0) return n;
+    }
+  }
+
+  return 1;
 }
 
 function extractAmountOrNull(textNorm: string): number | null {
@@ -750,20 +800,12 @@ function buildAll(stored: Stored) {
 
   for (const c of codes) {
     const r = rates[c];
+    const showUnit = r.kind === "currency" && (r.unit || 1) > 1;
+    const baseAmount = showUnit ? (r.unit || 1) : 1;
+    const baseToman = showUnit ? Math.round(r.price) : Math.round(r.price / (r.unit || 1));
+    const priceStr = formatToman(baseToman);
     
-    // اگر واحد خاصی در کاستوم‌ها تعریف شده، آن را اعمال کنیم
-    let scale = 1;
-    let label = "";
-    if (r.kind === "currency" && CUSTOM_UNITS[c]) {
-      scale = CUSTOM_UNITS[c];
-      label = `(${scale}تایی) `;
-    }
-
-    const perUnit = r.price / (r.unit || 1);
-    const finalPrice = Math.round(perUnit * scale);
-    const priceStr = formatToman(finalPrice);
-    
-    if (r.kind === "crypto") {
+        if (r.kind === "crypto") {
       const usdP = r.usdPrice != null ? formatUSD(r.usdPrice) : "?";
       const changePart = (typeof r.change24h === "number")
         ? ` | ${r.change24h >= 0 ? "🟢" : "🔴"} ${Math.abs(r.change24h).toFixed(1)}%`
@@ -773,7 +815,12 @@ function buildAll(stored: Stored) {
       cryptoItems.push(line);
     } else {
       const meta = META[c] ?? { emoji: "💱", fa: (r.title || c.toUpperCase()) };
-      const line = `${meta.emoji} <b>${meta.fa} ${label}:</b> \u200E<code>${priceStr}</code> تومان`;
+      const usd = stored.rates["usd"];
+      const usdPer1 = usd ? (usd.price / (usd.unit || 1)) : null;
+      const usdEq = (usdPer1 && c !== "usd" && r.kind === "currency") ? (baseToman / usdPer1) : null;
+      const unitPrefix = showUnit ? `${baseAmount} ` : "";
+      const usdPart = usdEq != null ? ` (≈ $${formatUSD(usdEq)})` : "";
+      const line = `${meta.emoji} <b>${unitPrefix}${meta.fa}:</b> \u200E<code>${priceStr}</code> تومان${usdPart}`;
       if (r.kind === "gold" || c.includes("coin") || c.includes("gold")) goldItems.push(line);
       else currencyItems.push(line);
     }
@@ -844,6 +891,11 @@ function clampPage(page: number, totalPages: number) {
   return page;
 }
 
+function shortButtonText(s: string, max = 60) {
+  if (s.length <= max) return s;
+  return s.slice(0, max - 1) + "…";
+}
+
 function shortColText(s: string, max = 18) {
   const t = s.replace(/\s+/g, " ").trim();
   if (t.length <= max) return t;
@@ -908,24 +960,16 @@ function buildPriceItems(stored: Stored, category: PriceCategory): PriceListItem
   const items: PriceListItem[] = [];
   for (const c of merged) {
     const r = rates[c];
-    
-    // اعمال یونیت سفارشی در لیست دکمه ای
-    let scale = 1;
-    let suffix = "";
-    if (CUSTOM_UNITS[c]) {
-      scale = CUSTOM_UNITS[c];
-      suffix = ` (${scale})`;
-    }
-
-    const per1 = Math.round(r.price / (r.unit || 1));
-    const priceStr = formatToman(per1 * scale);
+    const showUnit = r.kind === "currency" && (r.unit || 1) > 1;
+    const baseAmount = showUnit ? (r.unit || 1) : 1;
+    const baseToman = showUnit ? Math.round(r.price) : Math.round(r.price / (r.unit || 1));
+    const priceStr = formatToman(baseToman);
     const meta = META[c] ?? { emoji: "💱", fa: (r.title || r.fa || c.toUpperCase()) };
-    
     items.push({
       code: c,
       category,
       emoji: meta.emoji,
-      name: shortColText(meta.fa + suffix, 20),
+      name: shortColText(showUnit ? `${baseAmount} ${meta.fa}` : meta.fa, 20),
       price: shortColText(`${priceStr} ت`, 16)
     });
   }
@@ -976,8 +1020,10 @@ function buildCategoryHeaderText(category: PriceCategory, page: number, totalPag
 function buildPriceDetailText(stored: Stored, category: PriceCategory, code: string) {
   const r = stored.rates?.[code];
   if (!r) return "❗️این آیتم پیدا نشد.";
-  const per1 = Math.round(r.price / (r.unit || 1));
-  const toman = formatToman(per1);
+  const showUnit = r.kind === "currency" && (r.unit || 1) > 1;
+  const baseAmount = showUnit ? (r.unit || 1) : 1;
+  const baseToman = showUnit ? Math.round(r.price) : Math.round(r.price / (r.unit || 1));
+  const toman = formatToman(baseToman);
 
   if (category === "crypto") {
     const usdP = r.usdPrice != null ? formatUSD(r.usdPrice) : "?";
@@ -989,7 +1035,6 @@ function buildPriceDetailText(stored: Stored, category: PriceCategory, code: str
 
     return [
       `${meta.emoji} <b>${meta.fa}</b> (${code.toUpperCase()})`,
-      "➖➖➖➖➖➖➖",
       `💶 قیمت: <code>${toman}</code> تومان`,
       `💵 قیمت دلاری: <code>${usdP}</code> $`,
       `📈 تغییر 24ساعته: ${changeEmoji} <b>${changeStr}</b>`,
@@ -999,93 +1044,83 @@ function buildPriceDetailText(stored: Stored, category: PriceCategory, code: str
   }
 
   const meta = META[code] ?? { emoji: "💱", fa: (r.title || r.fa || code.toUpperCase()) };
-  
-  // برای نمایش دیتیل هم اگر واحد خاص دارد نشان دهیم
-  let extraInfo = "";
-  if (CUSTOM_UNITS[code]) {
-     const scale = CUSTOM_UNITS[code];
-     extraInfo = `\n📦 قیمت ${scale} تایی: <code>${formatToman(per1 * scale)}</code> تومان`;
-  }
-  
-  // محاسبه معادل دلاری
-  let usdEq = "";
-  if (stored.usdToman > 0) {
-      const usdVal = per1 / stored.usdToman;
-      usdEq = `\n💵 معادل: <code>${formatUSD(usdVal)}</code> دلار`;
-  }
-
+  const usd = stored.rates["usd"];
+  const usdPer1 = usd ? (usd.price / (usd.unit || 1)) : null;
+  const usdEq = (usdPer1 && code !== "usd" && r.kind === "currency") ? (baseToman / usdPer1) : null;
+  const unitPrefix = showUnit ? `${baseAmount} ` : "";
   return [
-    `${meta.emoji} <b>${meta.fa}</b>`,
-    "➖➖➖➖➖➖➖",
-    `💶 قیمت واحد: <code>${toman}</code> تومان`,
-    extraInfo,
-    usdEq,
+    `${meta.emoji} <b>${unitPrefix}${meta.fa}</b>`,
+    `💶 قیمت: <code>${toman}</code> تومان`,
+    usdEq != null ? `💵 معادل دلار: <code>${formatUSD(usdEq)}</code> $` : "",
+    r.unit && r.unit !== 1 ? `📦 واحد مرجع: <code>${r.unit}</code>` : "",
     "",
     `🕐 <b>بروزرسانی:</b> ${getUpdateTimeStr(stored)}`
   ].filter(Boolean).join("\n");
 }
 
-function replyCurrency(r: Rate, amount: number, usdTomanRate: number, code: string) {
-  const isDefaultAmount = amount === 1;
-  let finalAmount = amount;
-  let scaleLabel = "";
+function buildDetailKeyboard(category: PriceCategory, page: number) {
+  return {
+    inline_keyboard: [
+      [
+        { text: "🔙 بازگشت", callback_data: `page:${category}:${page}` },
+        { text: "🏠 خانه", callback_data: "start_menu" }
+      ]
+    ]
+  };
+}
 
-  // اگر کاربر عدد وارد نکرده و ارز جزو ارزهای کم ارزش است، واحد پیش‌فرض را استفاده کن
-  if (isDefaultAmount && CUSTOM_UNITS[code]) {
-    finalAmount = CUSTOM_UNITS[code];
-    scaleLabel = `(قیمت ${finalAmount} تایی)`;
-  }
+function replyCurrency(r: Rate, amount: number, stored: Stored, hasAmount: boolean) {
+  // Some fiat currencies are commonly quoted in Iran by a reference unit (e.g., 10 JPY, 100 IQD).
+  // If the user didn't specify an amount, show the market reference unit instead of 1.
+  const refUnit = Math.max(1, r.unit || 1);
+  const useRefUnitAsDefault = !hasAmount && r.kind === "currency" && refUnit > 1;
 
-  const per1Toman = r.price / (r.unit || 1);
-  const totalToman = per1Toman * finalAmount;
-  
-  const aStr = Number.isInteger(finalAmount) ? String(finalAmount) : String(finalAmount);
-  
-  // محاسبه قیمت دلاری
-  let usdLine = "";
+  const a = useRefUnitAsDefault ? refUnit : amount;
+  const per1 = r.price / refUnit;
+  const totalToman = useRefUnitAsDefault ? r.price : (per1 * a);
+
+  const aStr = Number.isInteger(a) ? String(a) : String(a);
+
+  // USD conversion (for fiat replies)
+  const usd = stored.rates["usd"];
+  const usdPer1 = usd ? (usd.price / (usd.unit || 1)) : null;
+  const totalUsd = usdPer1 ? (totalToman / usdPer1) : null;
+
   if (r.kind === "crypto") {
-    const totalUsd = (r.usdPrice || 0) * finalAmount;
-    usdLine = `💵 <b>${formatUSD(totalUsd)} $</b>`;
-  } else if (usdTomanRate > 0) {
-    const totalUsd = totalToman / usdTomanRate;
-    usdLine = `💵 <b>${formatUSD(totalUsd)} $</b>`;
+    const totalCryptoUsd = (r.usdPrice || 0) * a;
+    return `💎 <b>${aStr} ${r.fa} (${r.title})</b>\n\n💵 قیمت دلاری: ${formatUSD(totalCryptoUsd)}$\n🇮🇷 قیمت تومانی: ${formatToman(totalToman)} تومان`;
   }
 
-  const emoji = r.emoji || (r.kind === 'crypto' ? '💎' : '💱');
-  const title = r.fa || r.title || code.toUpperCase();
+  const isUsd = (stored.rates["usd"] === r) || (r.title || "").toLowerCase() === "us dollar";
+  const usdLine = (!isUsd && totalUsd != null) ? `\n💵 معادل دلار: <code>${formatUSD(totalUsd)}</code> $` : "";
 
-  return [
-    `${emoji} <b>${title}</b> ${scaleLabel}`,
-    "➖➖➖➖➖➖➖",
-    `🇮🇷 <b>${formatToman(totalToman)} تومان</b>`,
-    usdLine,
-    "",
-    (finalAmount !== 1 && !scaleLabel) ? `🧮 <i>محاسبه شده برای ${aStr} واحد</i>` : ""
-  ].filter(Boolean).join("\n");
+  if (useRefUnitAsDefault) {
+    return `💱 <b>${aStr} ${r.fa}</b>${usdLine}\n💶 ${formatToman(totalToman)} تومان`;
+  }
+
+  if (a <= 1) {
+    const per1Usd = (!isUsd && usdPer1) ? (per1 / usdPer1) : null;
+    const per1UsdLine = (!isUsd && per1Usd != null) ? `\n💵 معادل دلار: <code>${formatUSD(per1Usd)}</code> $` : "";
+    return `💱 <b>1 ${r.fa}</b>${per1UsdLine}\n💶 ${formatToman(per1)} تومان`;
+  }
+
+  return `💱 <b>${aStr} ${r.fa}</b>${usdLine}\n💶 ${formatToman(totalToman)} تومان`;
 }
 
 function replyGold(rGold: Rate, amount: number, stored: Stored) {
   const per1Toman = rGold.price / (rGold.unit || 1);
   const totalToman = per1Toman * amount;
+  const usd = stored.rates["usd"];
   const aStr = Number.isInteger(amount) ? String(amount) : String(amount);
-  
-  let usdLine = "";
-  if (stored.usdToman > 0) {
-    const totalUsd = totalToman / stored.usdToman;
-    usdLine = `💵 <b>${formatUSD(totalUsd)} $</b>`;
+  if (usd) {
+    const usdPer1 = usd.price / (usd.unit || 1);
+    const totalUsd = totalToman / usdPer1;
+    return [
+      `💰 ${aStr} ${rGold.fa} = ${formatUSD(totalUsd)}$`,
+      `💶 ${formatToman(totalToman)} تومان`
+    ].join("\n");
   }
-
-  const emoji = rGold.emoji || "🟡";
-  const title = rGold.fa || rGold.title;
-
-  return [
-    `${emoji} <b>${title}</b>`,
-    "➖➖➖➖➖➖➖",
-    `🇮🇷 <b>${formatToman(totalToman)} تومان</b>`,
-    usdLine,
-    "",
-    amount !== 1 ? `🧮 <i>محاسبه شده برای ${aStr} واحد</i>` : ""
-  ].filter(Boolean).join("\n");
+  return `💶 ${aStr} ${rGold.fa} = ${formatToman(totalToman)} تومان`;
 }
 
 const START_KEYBOARD = {
@@ -1277,7 +1312,7 @@ export default {
       const r = stored.rates[code];
       if (!r) return;
 
-      const out = r.kind === "gold" ? replyGold(r, amount, stored) : replyCurrency(r, amount, stored.usdToman, code);
+      const out = r.kind === "gold" ? replyGold(r, amount, stored) : replyCurrency(r, amount, stored, parsed.hasAmount);
       await tgSend(env, chatId, out, replyTo);
     };
 
