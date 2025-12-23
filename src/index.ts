@@ -1021,40 +1021,30 @@ function buildPriceDetailText(stored: Stored, category: PriceCategory, code: str
 
 function replyCurrency(r: Rate, amount: number, stored: Stored, hasAmount: boolean) {
   // Some fiat currencies are commonly quoted in Iran by a reference unit (e.g., 10 JPY, 100 IQD).
-  // If the user didn't specify an amount, show the market reference unit instead of 1.
+  // For these currencies, ALWAYS treat the user's entered amount as "count of reference units".
+  // Example: if unit=100 and user enters 2 => 200 (base units) and total price becomes price*2.
   const refUnit = Math.max(1, r.unit || 1);
-  const useRefUnitAsDefault = !hasAmount && r.kind === "currency" && refUnit > 1;
 
-  const a = useRefUnitAsDefault ? refUnit : amount;
+  const effectiveBaseUnits = (r.kind === "currency" && refUnit > 1) ? (amount * refUnit) : amount;
   const per1 = r.price / refUnit;
-  const totalToman = useRefUnitAsDefault ? r.price : (per1 * a);
+  const totalToman = per1 * effectiveBaseUnits;
 
-  const aStr = Number.isInteger(a) ? String(a) : String(a);
+  const aStr = Number.isInteger(effectiveBaseUnits) ? String(effectiveBaseUnits) : String(effectiveBaseUnits);
 
   // USD conversion (for fiat replies)
   const usd = stored.rates["usd"];
   const usdPer1 = usd ? (usd.price / (usd.unit || 1)) : null;
   const totalUsd = usdPer1 ? (totalToman / usdPer1) : null;
 
-  if (r.kind === "crypto") {
-    const totalCryptoUsd = (r.usdPrice || 0) * a;
-    return `💎 <b>${aStr} ${r.fa} (${r.title})</b>\n\n💵 قیمت دلاری: ${formatUSD(totalCryptoUsd)}$\n🇮🇷 قیمت تومانی: ${formatToman(totalToman)} تومان`;
-  }
+  const maybeUsdLine = totalUsd ? `≈ ${formatUSD(totalUsd)}$` : null;
 
-  const isUsd = (stored.rates["usd"] === r) || (r.title || "").toLowerCase() === "us dollar";
-  const usdLine = (!isUsd && totalUsd != null) ? `\n💵 معادل دلار: <code>${formatUSD(totalUsd)}</code> $` : "";
+  const lines = [
+    `💶 ${aStr} ${r.fa} = ${formatToman(totalToman)} تومان`,
+  ];
 
-  if (useRefUnitAsDefault) {
-    return `💱 <b>${aStr} ${r.fa}</b>${usdLine}\n💶 ${formatToman(totalToman)} تومان`;
-  }
+  if (maybeUsdLine) lines.push(`💵 ${maybeUsdLine}`);
 
-  if (a <= 1) {
-    const per1Usd = (!isUsd && usdPer1) ? (per1 / usdPer1) : null;
-    const per1UsdLine = (!isUsd && per1Usd != null) ? `\n💵 معادل دلار: <code>${formatUSD(per1Usd)}</code> $` : "";
-    return `💱 <b>1 ${r.fa}</b>${per1UsdLine}\n💶 ${formatToman(per1)} تومان`;
-  }
-
-  return `💱 <b>${aStr} ${r.fa}</b>${usdLine}\n💶 ${formatToman(totalToman)} تومان`;
+  return lines.join("\n");
 }
 
 function replyGold(rGold: Rate, amount: number, stored: Stored) {
