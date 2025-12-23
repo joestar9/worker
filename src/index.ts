@@ -302,7 +302,9 @@ function parseCSV(text: string) {
     const name = parts[1].replace(/"/g, "").trim();
     const symbol = parts[2].replace(/"/g, "").trim().toLowerCase();
     const priceStr = parts[5];
+    const changeStr = parts[9];
     const price = parseFloat(priceStr);
+    const change = parseFloat(changeStr);
     if (!isNaN(price) && symbol) {
       result.push({ symbol, name, price, change });
     }
