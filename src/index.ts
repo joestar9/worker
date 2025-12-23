@@ -762,33 +762,83 @@ async function getStoredOrRefresh(env: Env, ctx: ExecutionContext): Promise<Stor
   return JSON.parse(txt2) as Stored;
 }
 
-function buildAll(stored: Stored) {
+function buildAll(stored: Stored, includeCrypto = true) {
   const rates = stored.rates;
   const codes = Object.keys(rates);
+
+  const goldCodes = new Set([
+    "gold_gram_18k",
+    "gold_mithqal",
+    "gold_ounce",
+    "coin_gerami",
+    "coin_gram",
+    "coin_azadi",
+    "coin_bahar",
+    "coin_emami",
+    "coin_half_azadi",
+    "coin_half",
+    "coin_quarter_azadi",
+    "coin_quarter"
+  ]);
+
+  const goldOrder = [
+    "coin_gerami",
+    "coin_gram",
+    "gold_gram_18k",
+    "gold_mithqal",
+    "coin_azadi",
+    "coin_bahar",
+    "coin_emami",
+    "coin_half_azadi",
+    "coin_half",
+    "coin_quarter_azadi",
+    "coin_quarter",
+    "gold_ounce"
+  ];
+
+  const fiatPriority = ["usd", "eur", "aed", "try", "afn", "iqd", "gbp", "amd", "aud", "azn", "bhd", "cad", "chf", "cny", "dkk", "hkd", "inr", "jpy", "kwd", "myr", "nok", "omr", "qar", "rub", "sar", "sek", "sgd", "thb"];
+
+  const cryptoPriority = ["btc", "eth", "ton", "usdt", "trx", "not", "doge", "sol", "bnb", "xrp", "usdc"];
 
   const goldItems: string[] = [];
   const currencyItems: string[] = [];
   const cryptoItems: string[] = [];
 
-  const priority = ["usd", "eur", "aed", "try", "afn", "iqd", "gbp"];
-  const cryptoPriority = ["btc", "eth", "ton", "usdt", "trx", "not", "doge", "sol"];
+  const safeFa = (code: string, r: Rate) => (META[code]?.fa ?? r.fa ?? r.title ?? code.toUpperCase());
+  const safeEmoji = (code: string, r: Rate) => (META[code]?.emoji ?? r.emoji ?? "💱");
+
+  const goldIndex = new Map<string, number>(goldOrder.map((c, i) => [c, i]));
+  const fiatIndex = new Map<string, number>(fiatPriority.map((c, i) => [c, i]));
+  const cryptoIndex = new Map<string, number>(cryptoPriority.map((c, i) => [c, i]));
 
   codes.sort((a, b) => {
     const rA = rates[a], rB = rates[b];
-    if (rA.kind !== rB.kind) return 0;
-    if (rA.kind === "currency") {
-      const idxA = priority.indexOf(a), idxB = priority.indexOf(b);
-      if (idxA !== -1 && idxB !== -1) return idxA - idxB;
-      if (idxA !== -1) return -1;
-      if (idxB !== -1) return 1;
+    const isGoldA = goldCodes.has(a) || rA.kind === "gold";
+    const isGoldB = goldCodes.has(b) || rB.kind === "gold";
+    const isCryptoA = rA.kind === "crypto";
+    const isCryptoB = rB.kind === "crypto";
+
+    if (isGoldA !== isGoldB) return isGoldA ? -1 : 1;
+    if (isCryptoA !== isCryptoB) return isCryptoA ? 1 : -1;
+
+    if (isGoldA && isGoldB) {
+      const ia = goldIndex.get(a) ?? 9999;
+      const ib = goldIndex.get(b) ?? 9999;
+      if (ia !== ib) return ia - ib;
+      return safeFa(a, rA).localeCompare(safeFa(b, rB), "fa");
     }
-    if (rA.kind === "crypto") {
-      const idxA = cryptoPriority.indexOf(a), idxB = cryptoPriority.indexOf(b);
-      if (idxA !== -1 && idxB !== -1) return idxA - idxB;
-      if (idxA !== -1) return -1;
-      if (idxB !== -1) return 1;
+
+    if (isCryptoA && isCryptoB) {
+      const ia = cryptoIndex.get(a) ?? 9999;
+      const ib = cryptoIndex.get(b) ?? 9999;
+      if (ia !== ib) return ia - ib;
+      return a.localeCompare(b);
     }
-    return a.localeCompare(b);
+
+    const ia = fiatIndex.get(a) ?? 9999;
+    const ib = fiatIndex.get(b) ?? 9999;
+    if (ia !== ib) return ia - ib;
+    return safeFa(a, rA).localeCompare(safeFa(b, rB), "fa");
   });
 
   for (const c of codes) {
@@ -796,20 +846,20 @@ function buildAll(stored: Stored) {
     const per1 = Math.round(r.price / (r.unit || 1));
     const priceStr = formatToman(per1);
 
-        if (r.kind === "crypto") {
+    if (r.kind === "crypto") {
+      if (!includeCrypto) continue;
       const usdP = r.usdPrice != null ? formatUSD(r.usdPrice) : "?";
       const changePart = (typeof r.change24h === "number")
         ? ` | ${r.change24h >= 0 ? "🟢" : "🔴"} ${Math.abs(r.change24h).toFixed(1)}%`
         : "";
-      const line = `💎 <b>${r.fa}</b> (${c.toUpperCase()})
-└ ${priceStr} ت | ${usdP}$${changePart}`;
-      cryptoItems.push(line);
-    } else {
-      const meta = META[c] ?? { emoji: "💱", fa: (r.title || c.toUpperCase()) };
-      const line = `${meta.emoji} <b>${meta.fa}:</b> \u200E<code>${priceStr}</code> تومان`;
-      if (r.kind === "gold" || c.includes("coin") || c.includes("gold")) goldItems.push(line);
-      else currencyItems.push(line);
+      cryptoItems.push(`💎 <b>${r.fa}</b> (${c.toUpperCase()})
+└ ${priceStr} ت | ${usdP}$${changePart}`);
+      continue;
     }
+
+    const line = `${safeEmoji(c, r)} <b>${safeFa(c, r)}:</b> ‎<code>${priceStr}</code> تومان`;
+    if (goldCodes.has(c) || r.kind === "gold" || c.includes("coin") || c.includes("gold")) goldItems.push(line);
+    else currencyItems.push(line);
   }
 
   const lines: string[] = [];
@@ -825,10 +875,10 @@ function buildAll(stored: Stored) {
     lines.push("💵 <b>نرخ ارزهای بازار</b>");
     lines.push("➖➖➖➖➖➖");
     lines.push(...currencyItems);
-    lines.push("");
   }
 
-  if (cryptoItems.length > 0) {
+  if (includeCrypto && cryptoItems.length > 0) {
+    lines.push("");
     lines.push("🚀 <b>بازار ارز دیجیتال</b>");
     lines.push("➖➖➖➖➖➖");
     lines.push(...cryptoItems);
@@ -836,9 +886,11 @@ function buildAll(stored: Stored) {
 
   const date = new Date(stored.fetchedAtMs + (3.5 * 3600000));
   const timeStr = date.toISOString().substr(11, 5);
-  lines.push("\n🕐 <b>بروزرسانی:</b> " + timeStr);
+  lines.push("");
+  lines.push("🕐 <b>بروزرسانی:</b> " + timeStr);
 
-  return lines.join("\n");
+  return lines.join("
+");
 }
 
 const PRICE_PAGE_SIZE = 8;
@@ -1245,6 +1297,14 @@ export default {
         if (!env.ADMIN_KEY || key !== env.ADMIN_KEY) return;
         const r = await refreshRates(env);
         await tgSend(env, chatId, r.ok ? "✅ بروزرسانی شد" : "⛔️ خطا", replyTo);
+        return;
+      }
+
+      const only = stripPunct(textNorm).replace(/\s+/g, " ").trim();
+      if (only === "ارز") {
+        const stored = await getStoredOrRefresh(env, ctx);
+        const txt = buildAll(stored, false);
+        await tgSend(env, chatId, txt, replyTo);
         return;
       }
 
