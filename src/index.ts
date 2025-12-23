@@ -15,8 +15,7 @@ const COBALT_INSTANCES = [
   "https://capi.3kh0.net",
   "https://cobalt-api.kwiatekmiki.com",
   "https://downloadapi.stuff.solutions",
-  "https://co.wuk.sh/api/json",
-  "https://cobalt.canine.tools/",
+  "https://cobalt.canine.tools",
   "https://api.cobalt.tools",
   "https://blossom.imput.net",
   "https://kityune.imput.net",
@@ -27,6 +26,12 @@ const COBALT_INSTANCES = [
 
 const KEY_RATES = "rates:v2:latest";
 const KEY_HASH = "rates:v2:hash";
+
+const PARSE_TTL_MS = 15000;
+const CONTEXT_TTL_MS = 60000;
+const PARSE_CACHE_MAX = 5000;
+const parseCache = new Map<string, { ts: number; code: string | null; amount: number; hasAmount: boolean }>();
+const userContext = new Map<number, { ts: number; code: string }>();
 
 type Rate = { 
   price: number; 
@@ -584,6 +589,63 @@ function extractAmount(textNorm: string) {
   }
 
   return 1;
+}
+
+function extractAmountOrNull(textNorm: string): number | null {
+  const cleaned = stripPunct(textNorm).replace(/\s+/g, " ").trim();
+  const digitScaled = parseDigitsWithScale(cleaned);
+  if (digitScaled != null && digitScaled > 0) return digitScaled;
+
+  const tokens = cleaned.split(" ").filter(Boolean);
+  const maxWin = Math.min(tokens.length, 10);
+  for (let w = maxWin; w >= 1; w--) {
+    for (let i = 0; i + w <= tokens.length; i++) {
+      const n = parsePersianNumber(tokens.slice(i, i + w));
+      if (n != null && n > 0) return n;
+    }
+  }
+  return null;
+}
+
+function pruneParseCache(now: number) {
+  if (parseCache.size <= PARSE_CACHE_MAX) return;
+  const keys: string[] = [];
+  for (const [k, v] of parseCache) {
+    if (now - v.ts > PARSE_TTL_MS) keys.push(k);
+  }
+  for (const k of keys) parseCache.delete(k);
+  if (parseCache.size <= PARSE_CACHE_MAX) return;
+  let i = 0;
+  for (const k of parseCache.keys()) {
+    parseCache.delete(k);
+    i++;
+    if (parseCache.size <= PARSE_CACHE_MAX) break;
+    if (i > PARSE_CACHE_MAX) break;
+  }
+}
+
+function getParsedIntent(userId: number, textNorm: string, rates: Record<string, Rate>) {
+  const now = Date.now();
+  pruneParseCache(now);
+  const cacheKey = `${userId}:${textNorm}`;
+  const cached = parseCache.get(cacheKey);
+  if (cached && now - cached.ts <= PARSE_TTL_MS) return cached;
+
+  let code = findCode(textNorm, rates);
+  const amountOrNull = extractAmountOrNull(textNorm);
+  const hasAmount = amountOrNull != null;
+  let amount = amountOrNull ?? 1;
+
+  if (!code) {
+    const ctx = userContext.get(userId);
+    if (ctx && now - ctx.ts <= CONTEXT_TTL_MS && hasAmount) code = ctx.code;
+  }
+
+  if (code) userContext.set(userId, { ts: now, code });
+
+  const out = { ts: now, code: code ?? null, amount, hasAmount };
+  parseCache.set(cacheKey, out);
+  return out;
 }
 
 function normalizeCommand(textNorm: string) {
@@ -1196,10 +1258,11 @@ export default {
         return;
       }
 
-      const code = findCode(textNorm, stored.rates);
-      if (!code) return;
+      const parsed = getParsedIntent(userId, textNorm, stored.rates);
+      if (!parsed.code) return;
 
-      const amount = extractAmount(textNorm);
+      const code = parsed.code;
+      const amount = parsed.amount;
       const r = stored.rates[code];
       if (!r) return;
 
