@@ -51,7 +51,6 @@ type Rate = {
   emoji: string; 
   fa: string;
   usdPrice?: number;
-  change24h?: number;
 };
 
 type Stored = { 
@@ -303,11 +302,9 @@ function parseCSV(text: string) {
     const name = parts[1].replace(/"/g, "").trim();
     const symbol = parts[2].replace(/"/g, "").trim().toLowerCase();
     const priceStr = parts[5];
-    const changeStr = parts[9];
     const price = parseFloat(priceStr);
-    const change = parseFloat(changeStr);
     if (!isNaN(price) && symbol) {
-      result.push({ symbol, name, price, change });
+      result.push({ symbol, name, price });
     }
   }
   return result;
@@ -890,11 +887,8 @@ function buildAll(stored: Stored) {
     
         if (r.kind === "crypto") {
       const usdP = r.usdPrice != null ? formatUSD(r.usdPrice) : "?";
-      const changePart = (typeof r.change24h === "number")
-        ? ` | ${r.change24h >= 0 ? "🟢" : "🔴"} ${Math.abs(r.change24h).toFixed(1)}%`
-        : "";
       const line = `💎 <b>${r.fa}</b> (${c.toUpperCase()})
-└ ${priceStr} ت | ${usdP}$${changePart}`;
+└ ${priceStr} ت | ${usdP}$`;
       cryptoItems.push(line);
     } else {
       const meta = META[c] ?? { emoji: "💱", fa: (r.title || c.toUpperCase()) };
@@ -1106,9 +1100,6 @@ function buildPriceDetailText(stored: Stored, category: PriceCategory, code: str
 
   if (category === "crypto") {
     const usdP = r.usdPrice != null ? formatUSD(r.usdPrice) : "?";
-    const change = r.change24h ?? 0;
-    const changeEmoji = change >= 0 ? "🟢" : "🔴";
-    const changeStr = Math.abs(change).toFixed(2) + "%";
 
     const meta = CRYPTO_META[code] ?? { emoji: (r.emoji || "💎"), fa: (r.fa || r.title || code.toUpperCase()) };
 
@@ -1123,9 +1114,15 @@ function buildPriceDetailText(stored: Stored, category: PriceCategory, code: str
   }
 
   const meta = META[code] ?? { emoji: "💱", fa: (r.title || r.fa || code.toUpperCase()) };
+  const usdRate = stored.rates?.["usd"];
+  const usdPer1 = usdRate ? (usdRate.price / (usdRate.unit || 1)) : null;
+  const usdEq = (code !== "usd" && usdPer1) ? (per1 / usdPer1) : null;
+  const usdLine = usdEq != null ? `💵 معادل دلاری: <code>${formatUSD(usdEq)}</code> $` : "";
   return [
     `${meta.emoji} <b>${meta.fa}</b>`,
     `💶 قیمت: <code>${toman}</code> تومان`,
+    usdLine,
+
     r.unit && r.unit !== 1 ? `📦 واحد: <code>${r.unit}</code>` : "",
     "",
     `🕐 <b>بروزرسانی:</b> ${getUpdateTimeStr(stored)}`
@@ -1143,18 +1140,33 @@ function buildDetailKeyboard(category: PriceCategory, page: number) {
   };
 }
 
-function replyCurrency(r: Rate, amount: number) {
-  const per1 = r.price / (r.unit || 1);
-  const total = per1 * amount;
+function replyCurrency(code: string, r: Rate, amount: number, stored: Stored) {
+  const per1Toman = r.price / (r.unit || 1);
+  const totalToman = per1Toman * amount;
   const aStr = Number.isInteger(amount) ? String(amount) : String(amount);
-  
+
+  // USD reference rate (toman per 1 USD)
+  const usdRate = stored.rates?.["usd"];
+  const usdPer1Toman = usdRate ? (usdRate.price / (usdRate.unit || 1)) : null;
+
   if (r.kind === "crypto") {
     const totalUsd = (r.usdPrice || 0) * amount;
-    return `💎 <b>${aStr} ${r.fa} (${r.title})</b>\n\n💵 قیمت دلاری: ${formatUSD(totalUsd)}$\n🇮🇷 قیمت تومانی: ${formatToman(total)} تومان`;
+    return `💎 <b>${aStr} ${r.fa} (${r.title})</b>
+
+💵 قیمت دلاری: ${formatUSD(totalUsd)}$
+🇮🇷 قیمت تومانی: ${formatToman(totalToman)} تومان`;
   }
 
-  if (amount <= 1) return `1 ${r.fa} = ${formatToman(per1)} تومان`;
-  return `${aStr} ${r.fa} = ${formatToman(total)} تومان`;
+  // For all fiat except USD, add USD equivalent too (when we have USD rate)
+  const totalUsdEq = (code !== "usd" && usdPer1Toman) ? (totalToman / usdPer1Toman) : null;
+
+  if (amount <= 1) {
+    const base = `1 ${r.fa} = ${formatToman(per1Toman)} تومان`;
+    return totalUsdEq != null ? `${base} | ${formatUSD(totalUsdEq)}$` : base;
+  }
+
+  const base = `${aStr} ${r.fa} = ${formatToman(totalToman)} تومان`;
+  return totalUsdEq != null ? `${base} | ${formatUSD(totalUsdEq)}$` : base;
 }
 
 function replyGold(rGold: Rate, amount: number, stored: Stored) {
@@ -1362,7 +1374,7 @@ export default {
       const r = stored.rates[code];
       if (!r) return;
 
-      const out = r.kind === "gold" ? replyGold(r, amount, stored) : replyCurrency(r, amount);
+      const out = r.kind === "gold" ? replyGold(r, amount, stored) : replyCurrency(code, r, amount, stored);
       await tgSend(env, chatId, out, replyTo);
     };
 
