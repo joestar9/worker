@@ -1010,9 +1010,6 @@ function buildPriceDetailText(stored: Stored, category: PriceCategory, code: str
 
   if (category === "crypto") {
     const usdP = r.usdPrice != null ? formatUSD(r.usdPrice) : "?";
-    const change = r.change24h ?? 0;
-    const changeEmoji = change >= 0 ? "🟢" : "🔴";
-    const changeStr = Math.abs(change).toFixed(2) + "%";
 
     const meta = CRYPTO_META[code] ?? { emoji: (r.emoji || "💎"), fa: (r.fa || r.title || code.toUpperCase()) };
 
@@ -1020,7 +1017,6 @@ function buildPriceDetailText(stored: Stored, category: PriceCategory, code: str
       `${meta.emoji} <b>${meta.fa}</b> (${code.toUpperCase()})`,
       `💶 قیمت: <code>${toman}</code> تومان`,
       `💵 قیمت دلاری: <code>${usdP}</code> $`,
-      `📈 تغییر 24ساعته: ${changeEmoji} <b>${changeStr}</b>`,
       "",
       `🕐 <b>بروزرسانی:</b> ${getUpdateTimeStr(stored)}`
     ].join("\n");
