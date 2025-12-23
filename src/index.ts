@@ -1019,7 +1019,7 @@ function buildPriceDetailText(stored: Stored, category: PriceCategory, code: str
   ].filter(Boolean).join("\n");
 }
 
-function replyCurrency(r: Rate, amount: number, stored: Stored, hasAmount: boolean) {
+function replyCurrency(code: string, r: Rate, amount: number, stored: Stored, hasAmount: boolean) {
   const refUnit = Math.max(1, r.unit || 1);
 
   // ---------- CRYPTO ----------
@@ -1057,25 +1057,25 @@ function replyCurrency(r: Rate, amount: number, stored: Stored, hasAmount: boole
   const baseUnits = refUnit > 1 ? (refCount * refUnit) : refCount;
 
   // r.price is the price for one reference unit (refUnit base units).
-  const perRefToman = r.price; // already for refUnit
   const per1Toman = r.price / refUnit;
   const totalToman = per1Toman * baseUnits;
 
   const usd = stored.rates["usd"];
   const usdPer1Toman = usd ? (usd.price / (usd.unit || 1)) : null;
-  const perRefUsd = usdPer1Toman ? (perRefToman / usdPer1Toman) : null;
   const totalUsd = usdPer1Toman ? (totalToman / usdPer1Toman) : null;
 
-  const unitLabel = refUnit > 1 ? `${refUnit} ${r.fa}` : `${r.fa}`;
-  const qtyLabel = refUnit > 1 ? `${refCount}× (${refUnit} ${r.fa}) = ${baseUnits} ${r.fa}` : `${baseUnits} ${r.fa}`;
+  // Bidi-safe pieces (numbers + emoji can get reordered in RTL)
+  const LRI = "\u2066"; // left-to-right isolate
+  const RLI = "\u2067"; // right-to-left isolate
+  const PDI = "\u2069"; // pop directional isolate
+
+  const meta = META[code] ?? { emoji: "💱", fa: (r.fa || r.title || code.toUpperCase()) };
+  const titleLine = `${LRI}${refCount}${PDI} ${RLI}${meta.fa}${PDI} ${LRI}${meta.emoji}${PDI}`;
 
   const lines: string[] = [];
-  lines.push(`💱 <b>${r.fa}</b>`);
-  lines.push("➖➖➖➖➖➖");
-  lines.push(`🧾 <b>واحد مرجع:</b> <code>${unitLabel}</code>`);
-  lines.push(`💶 <b>قیمت واحد:</b> <code>${formatToman(Math.round(perRefToman))}</code> تومان${perRefUsd != null ? ` (≈ <code>${formatUSD(perRefUsd)}</code> $)` : ""}`);
-  lines.push(`🧮 <b>محاسبه:</b> <code>${qtyLabel}</code>`);
-  lines.push(`✅ <b>جمع کل:</b> <code>${formatToman(Math.round(totalToman))}</code> تومان${totalUsd != null ? ` (≈ <code>${formatUSD(totalUsd)}</code> $)` : ""}`);
+  lines.push(`<b>${titleLine}</b>`);
+  if (code !== "usd" && totalUsd != null) lines.push(`💵 معادل دلار: <code>${formatUSD(totalUsd)}</code> $`);
+  lines.push(`💶 <code>${formatToman(Math.round(totalToman))}</code> تومان`);
   return lines.join("\n");
 }
 
@@ -1297,7 +1297,7 @@ export default {
       const r = stored.rates[code];
       if (!r) return;
 
-      const out = r.kind === "gold" ? replyGold(r, amount, stored) : replyCurrency(r, amount, stored, parsed.hasAmount);
+      const out = r.kind === "gold" ? replyGold(r, amount, stored) : replyCurrency(code, r, amount, stored, parsed.hasAmount);
       await tgSend(env, chatId, out, replyTo);
     };
 
