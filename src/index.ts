@@ -15,8 +15,7 @@ const COBALT_INSTANCES = [
   "https://capi.3kh0.net",
   "https://cobalt-api.kwiatekmiki.com",
   "https://downloadapi.stuff.solutions",
-  "https://co.wuk.sh/api/json",
-  "https://cobalt.canine.tools/",
+  "https://cobalt.canine.tools",
   "https://api.cobalt.tools",
   "https://blossom.imput.net",
   "https://kityune.imput.net",
@@ -1156,24 +1155,13 @@ export default {
         const category = (data.split(":")[1] as any) as PriceCategory;
         await tgAnswerCallback(env, cb.id, "در حال دریافت قیمت‌ها...");
         const stored = await getStoredOrRefresh(env, ctx);
-      if (textNorm === "ارز") {
-        const category: PriceCategory = "fiat";
-        const items = buildPriceItems(stored, category);
-        const totalPages = Math.max(1, Math.ceil(items.length / PRICE_PAGE_SIZE));
-        const page = 0;
-        const header = buildCategoryHeaderText(category, page, totalPages, stored);
-        const kb = buildPricesKeyboard(category, page, totalPages, items);
-        await tgSend(env, chatId, header, replyTo, kb);
-        return;
-      }
-
         const items = buildPriceItems(stored, category);
         const totalPages = Math.max(1, Math.ceil(items.length / PRICE_PAGE_SIZE));
         const page = 0;
         const timeStr = getUpdateTimeStr(stored);
         const text = buildCategoryHeaderText(category, page, totalPages, timeStr);
         const kb = buildPricesKeyboard(category, page, totalPages, items);
-        await tgEditMessage(env, chatId, messageId, text, kb);
+        if (chatId && messageId) await tgEditMessage(env, chatId, messageId, text, kb);
         return new Response("ok");
       } else if (data?.startsWith("page:")) {
         const parts = data.split(":");
