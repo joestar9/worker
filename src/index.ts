@@ -15,7 +15,8 @@ const COBALT_INSTANCES = [
   "https://capi.3kh0.net",
   "https://cobalt-api.kwiatekmiki.com",
   "https://downloadapi.stuff.solutions",
-  "https://cobalt.canine.tools",
+  "https://co.wuk.sh/api/json",
+  "https://cobalt.canine.tools/",
   "https://api.cobalt.tools",
   "https://blossom.imput.net",
   "https://kityune.imput.net",
@@ -33,22 +34,22 @@ const PARSE_CACHE_MAX = 5000;
 const parseCache = new Map<string, { ts: number; code: string | null; amount: number; hasAmount: boolean }>();
 const userContext = new Map<number, { ts: number; code: string }>();
 
-type Rate = { 
-  price: number; 
-  unit: number; 
-  kind: "currency" | "gold" | "crypto"; 
-  title: string; 
-  emoji: string; 
+type Rate = {
+  price: number;
+  unit: number;
+  kind: "currency" | "gold" | "crypto";
+  title: string;
+  emoji: string;
   fa: string;
   usdPrice?: number;
   change24h?: number;
 };
 
-type Stored = { 
-  fetchedAtMs: number; 
-  source: string; 
-  timestamp?: string; 
-  rates: Record<string, Rate> 
+type Stored = {
+  fetchedAtMs: number;
+  source: string;
+  timestamp?: string;
+  rates: Record<string, Rate>
 };
 
 const META: Record<string, { emoji: string; fa: string }> = {
@@ -152,7 +153,6 @@ const ALIASES: Array<{ keys: string[]; code: string }> = [
   { keys: ["مونرو", "xmr", "monero"], code: "xmr" },
   { keys: ["بیت کوین کش", "bch", "bitcoincash"], code: "bch" }
 ];
-
 
 function normalizeDigits(input: string) {
   const map: Record<string, string> = {
@@ -766,17 +766,17 @@ async function getStoredOrRefresh(env: Env, ctx: ExecutionContext): Promise<Stor
 function buildAll(stored: Stored) {
   const rates = stored.rates;
   const codes = Object.keys(rates);
-  
+
   const goldItems: string[] = [];
   const currencyItems: string[] = [];
   const cryptoItems: string[] = [];
-  
+
   const priority = ["usd", "eur", "aed", "try", "afn", "iqd", "gbp"];
   const cryptoPriority = ["btc", "eth", "ton", "usdt", "trx", "not", "doge", "sol"];
 
   codes.sort((a, b) => {
     const rA = rates[a], rB = rates[b];
-    if (rA.kind !== rB.kind) return 0; 
+    if (rA.kind !== rB.kind) return 0;
     if (rA.kind === "currency") {
       const idxA = priority.indexOf(a), idxB = priority.indexOf(b);
       if (idxA !== -1 && idxB !== -1) return idxA - idxB;
@@ -796,7 +796,7 @@ function buildAll(stored: Stored) {
     const r = rates[c];
     const per1 = Math.round(r.price / (r.unit || 1));
     const priceStr = formatToman(per1);
-    
+
         if (r.kind === "crypto") {
       const usdP = r.usdPrice != null ? formatUSD(r.usdPrice) : "?";
       const changePart = (typeof r.change24h === "number")
@@ -814,12 +814,12 @@ function buildAll(stored: Stored) {
   }
 
   const lines: string[] = [];
-  
+
   if (goldItems.length > 0) {
     lines.push("🟡 <b>نرخ طلا و سکه</b>");
     lines.push("➖➖➖➖➖➖");
     lines.push(...goldItems);
-    lines.push(""); 
+    lines.push("");
   }
 
   if (currencyItems.length > 0) {
@@ -841,7 +841,6 @@ function buildAll(stored: Stored) {
 
   return lines.join("\n");
 }
-
 
 const PRICE_PAGE_SIZE = 8;
 
@@ -911,7 +910,7 @@ function buildPriceItems(stored: Stored, category: PriceCategory): PriceListItem
       const r = rates[c];
       const per1 = Math.round(r.price / (r.unit || 1));
       const toman = formatToman(per1);
-      const meta = CRYPTO_META[c] ?? { emoji: (r.emoji || "💎"), fa: (r.fa || r.title || c.toUpperCase()) };
+      const meta = CRYPTO_META[c] ?? { emoji: (r.emoji || "💎"), fa: c.toUpperCase() };
       items.push({
         code: c,
         category,
@@ -949,7 +948,7 @@ function buildPriceItems(stored: Stored, category: PriceCategory): PriceListItem
     const r = rates[c];
     const per1 = Math.round(r.price / (r.unit || 1));
     const priceStr = formatToman(per1);
-    const meta = META[c] ?? { emoji: "💱", fa: (r.title || r.fa || c.toUpperCase()) };
+    const meta = META[c] ?? { emoji: "💱", fa: (r.fa || c.toUpperCase()) };
     items.push({
       code: c,
       category,
@@ -1051,7 +1050,7 @@ function replyCurrency(r: Rate, amount: number) {
   const per1 = r.price / (r.unit || 1);
   const total = per1 * amount;
   const aStr = Number.isInteger(amount) ? String(amount) : String(amount);
-  
+
   if (r.kind === "crypto") {
     const totalUsd = (r.usdPrice || 0) * amount;
     return `💎 <b>${aStr} ${r.fa} (${r.title})</b>\n\n💵 قیمت دلاری: ${formatUSD(totalUsd)}$\n🇮🇷 قیمت تومانی: ${formatToman(total)} تومان`;
@@ -1101,11 +1100,12 @@ const HELP_KEYBOARD = {
 function getHelpMessage() {
   return `<b>🤖 راهنمای استفاده از ربات:</b>
 
-1️⃣ <b>قیمت ارز:</b> نام ارز را بفرستید (دلار، یورو، افغانی).
-2️⃣ <b>کریپتو:</b> نام ارز دیجیتال را بفرستید (بیت کوین، اتریوم، BTC، TON).
-3️⃣ <b>تبدیل:</b> مقدار + نام ارز (مثلاً: ۱۰۰ دلار، 0.5 بیت کوین).
-4️⃣ <b>طلا و سکه:</b> کلمه «طلا»، «سکه» یا «مثقال» را بفرستید.
-5️⃣ <b>دانلود اینستاگرام:</b> لینک پست را بفرستید.
+1️⃣ <b>لیست ارز و طلا:</b> فقط کلمه <b>ارز</b> را بفرستید.
+2️⃣ <b>قیمت ارز:</b> نام ارز را بفرستید (دلار، یورو، افغانی).
+3️⃣ <b>کریپتو:</b> نام ارز دیجیتال را بفرستید (بیت کوین، اتریوم، BTC، TON).
+4️⃣ <b>تبدیل:</b> مقدار + نام ارز (مثلاً: ۱۰۰ دلار، 0.5 بیت کوین).
+5️⃣ <b>طلا و سکه:</b> کلمه «طلا»، «سکه» یا «مثقال» را بفرستید.
+6️⃣ <b>دانلود اینستاگرام:</b> لینک پست را بفرستید.
 
 🔸 قیمت‌های کریپتو هم به دلار و هم به تومان محاسبه می‌شوند.
 🔸 نرخ تتر/دلار از بازار آزاد گرفته می‌شود.`;
@@ -1119,7 +1119,7 @@ export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
     if (url.pathname === "/health") return new Response("ok");
-    
+
     if (url.pathname === "/refresh") {
       const key = url.searchParams.get("key") || "";
       if (!env.ADMIN_KEY || key !== env.ADMIN_KEY) return new Response("Unauthorized", { status: 401 });
@@ -1156,6 +1156,17 @@ export default {
         const category = (data.split(":")[1] as any) as PriceCategory;
         await tgAnswerCallback(env, cb.id, "در حال دریافت قیمت‌ها...");
         const stored = await getStoredOrRefresh(env, ctx);
+      if (textNorm === "ارز") {
+        const category: PriceCategory = "fiat";
+        const items = buildPriceItems(stored, category);
+        const totalPages = Math.max(1, Math.ceil(items.length / PRICE_PAGE_SIZE));
+        const page = 0;
+        const header = buildCategoryHeaderText(category, page, totalPages, stored);
+        const kb = buildPricesKeyboard(category, page, totalPages, items);
+        await tgSend(env, chatId, header, replyTo, kb);
+        return;
+      }
+
         const items = buildPriceItems(stored, category);
         const totalPages = Math.max(1, Math.ceil(items.length / PRICE_PAGE_SIZE));
         const page = 0;
@@ -1200,7 +1211,7 @@ export default {
 
     const msg = update?.message;
     if (!msg) return new Response("ok");
-    
+
     const chatId: number | undefined = msg?.chat?.id;
     const text: string | undefined = msg?.text;
     const messageId: number | undefined = msg?.message_id;
@@ -1234,7 +1245,7 @@ export default {
         await tgSend(env, chatId, "👋 سلام! به ربات [ارز چی؟] خوش آمدید.\n\nمن می‌توانم قیمت ارزها و کریپتو را بگویم و ویدیوهای اینستاگرام را دانلود کنم.", replyTo, START_KEYBOARD);
         return;
       }
-      
+
       if (cmd === "/help") {
         await tgSend(env, chatId, getHelpMessage(), replyTo, HELP_KEYBOARD);
         return;
@@ -1243,20 +1254,13 @@ export default {
       if (cmd === "/refresh") {
         const parts = stripPunct(textNorm).split(/\s+/).filter(Boolean);
         const key = parts[1] || "";
-        if (!env.ADMIN_KEY || key !== env.ADMIN_KEY) return; 
+        if (!env.ADMIN_KEY || key !== env.ADMIN_KEY) return;
         const r = await refreshRates(env);
         await tgSend(env, chatId, r.ok ? "✅ بروزرسانی شد" : "⛔️ خطا", replyTo);
         return;
       }
 
       const stored = await getStoredOrRefresh(env, ctx);
-
-      if (cmd === "/all") {
-        const out = buildAll(stored);
-        const chunks = chunkText(out, 3800);
-        for (const c of chunks) await tgSend(env, chatId, c, replyTo);
-        return;
-      }
 
       const parsed = getParsedIntent(userId, textNorm, stored.rates);
       if (!parsed.code) return;
