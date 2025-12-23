@@ -1020,58 +1020,93 @@ function buildPriceDetailText(stored: Stored, category: PriceCategory, code: str
 }
 
 function replyCurrency(r: Rate, amount: number, stored: Stored, hasAmount: boolean) {
-  // Some fiat currencies are commonly quoted in Iran by a reference unit (e.g., 10 JPY, 100 IQD).
-  // For these currencies, ALWAYS treat the user's entered amount as "count of reference units".
-  // Example: if unit=100 and user enters 2 => 200 (base units) and total price becomes price*2.
   const refUnit = Math.max(1, r.unit || 1);
 
-  const effectiveBaseUnits = (r.kind === "currency" && refUnit > 1) ? (amount * refUnit) : amount;
-  const per1 = r.price / refUnit;
-  const totalToman = per1 * effectiveBaseUnits;
-
-  const aStr = Number.isInteger(effectiveBaseUnits) ? String(effectiveBaseUnits) : String(effectiveBaseUnits);
-
-  // USD conversion (for fiat replies)
-  const usd = stored.rates["usd"];
-  const usdPer1 = usd ? (usd.price / (usd.unit || 1)) : null;
-  const totalUsd = usdPer1 ? (totalToman / usdPer1) : null;
-
+  // ---------- CRYPTO ----------
   if (r.kind === "crypto") {
-    const totalCryptoUsd = (r.usdPrice || 0) * a;
-    return `💎 <b>${aStr} ${r.fa} (${r.title})</b>\n\n💵 قیمت دلاری: ${formatUSD(totalCryptoUsd)}$\n🇮🇷 قیمت تومانی: ${formatToman(totalToman)} تومان`;
+    const qty = hasAmount ? amount : 1;
+    const totalToman = (r.price / refUnit) * (qty * refUnit);
+
+    const per1Usd = (typeof r.usdPrice === "number") ? r.usdPrice : null;
+    const totalUsdDirect = per1Usd ? (per1Usd * qty) : null;
+
+    // Fallback USD conversion via USD/Toman if usdPrice isn't provided
+    const usd = stored.rates["usd"];
+    const usdPer1Toman = usd ? (usd.price / (usd.unit || 1)) : null;
+    const totalUsd = totalUsdDirect ?? (usdPer1Toman ? (totalToman / usdPer1Toman) : null);
+
+    const changeLine = (typeof r.change24h === "number")
+      ? `${r.change24h >= 0 ? "🟢" : "🔴"} <b>تغییر 24h:</b> ${r.change24h.toFixed(2)}%`
+      : null;
+
+    const titlePart = (r.title && r.title !== r.fa) ? ` <i>(${r.title})</i>` : "";
+    const lines: string[] = [];
+    lines.push(`💎 <b>${r.fa}</b>${titlePart}`);
+    lines.push("➖➖➖➖➖➖");
+    lines.push(`🧮 <b>تعداد:</b> <code>${qty}</code>`);
+    lines.push(`💶 <b>قیمت:</b> <code>${formatToman(Math.round(totalToman))}</code> تومان`);
+    if (totalUsd != null) lines.push(`💵 <b>معادل:</b> <code>${formatUSD(totalUsd)}</code> $`);
+    if (changeLine) lines.push(changeLine);
+    return lines.join("\n");
   }
 
-  const isUsd = (stored.rates["usd"] === r) || (r.title || "").toLowerCase() === "us dollar";
-  const usdLine = (!isUsd && totalUsd != null) ? `\n💵 معادل دلار: <code>${formatUSD(totalUsd)}</code> $` : "";
+  // ---------- FIAT / CURRENCY ----------
+  // For reference-unit currencies (JPY/IQD/AMD), treat the user's amount as "count of reference units".
+  // Example: unit=100 and user enters 2 => 2 × (100 IQD).
+  const refCount = hasAmount ? amount : 1;
+  const baseUnits = refUnit > 1 ? (refCount * refUnit) : refCount;
 
-  if (useRefUnitAsDefault) {
-    return `💱 <b>${aStr} ${r.fa}</b>${usdLine}\n💶 ${formatToman(totalToman)} تومان`;
-  }
+  // r.price is the price for one reference unit (refUnit base units).
+  const perRefToman = r.price; // already for refUnit
+  const per1Toman = r.price / refUnit;
+  const totalToman = per1Toman * baseUnits;
 
-  if (a <= 1) {
-    const per1Usd = (!isUsd && usdPer1) ? (per1 / usdPer1) : null;
-    const per1UsdLine = (!isUsd && per1Usd != null) ? `\n💵 معادل دلار: <code>${formatUSD(per1Usd)}</code> $` : "";
-    return `💱 <b>1 ${r.fa}</b>${per1UsdLine}\n💶 ${formatToman(per1)} تومان`;
-  }
+  const usd = stored.rates["usd"];
+  const usdPer1Toman = usd ? (usd.price / (usd.unit || 1)) : null;
+  const perRefUsd = usdPer1Toman ? (perRefToman / usdPer1Toman) : null;
+  const totalUsd = usdPer1Toman ? (totalToman / usdPer1Toman) : null;
 
-  return `💱 <b>${aStr} ${r.fa}</b>${usdLine}\n💶 ${formatToman(totalToman)} تومان`;
+  const unitLabel = refUnit > 1 ? `${refUnit} ${r.fa}` : `${r.fa}`;
+  const qtyLabel = refUnit > 1 ? `${refCount}× (${refUnit} ${r.fa}) = ${baseUnits} ${r.fa}` : `${baseUnits} ${r.fa}`;
+
+  const lines: string[] = [];
+  lines.push(`💱 <b>${r.fa}</b>`);
+  lines.push("➖➖➖➖➖➖");
+  lines.push(`🧾 <b>واحد مرجع:</b> <code>${unitLabel}</code>`);
+  lines.push(`💶 <b>قیمت واحد:</b> <code>${formatToman(Math.round(perRefToman))}</code> تومان${perRefUsd != null ? ` (≈ <code>${formatUSD(perRefUsd)}</code> $)` : ""}`);
+  lines.push(`🧮 <b>محاسبه:</b> <code>${qtyLabel}</code>`);
+  lines.push(`✅ <b>جمع کل:</b> <code>${formatToman(Math.round(totalToman))}</code> تومان${totalUsd != null ? ` (≈ <code>${formatUSD(totalUsd)}</code> $)` : ""}`);
+  return lines.join("\n");
 }
+
+
 
 function replyGold(rGold: Rate, amount: number, stored: Stored) {
-  const per1Toman = rGold.price / (rGold.unit || 1);
-  const totalToman = per1Toman * amount;
+  const refUnit = Math.max(1, rGold.unit || 1);
+  const qty = amount || 1;
+
+  const perRefToman = rGold.price; // price for refUnit (usually 1)
+  const per1Toman = rGold.price / refUnit;
+  const totalToman = per1Toman * (qty * refUnit);
+
   const usd = stored.rates["usd"];
-  const aStr = Number.isInteger(amount) ? String(amount) : String(amount);
-  if (usd) {
-    const usdPer1 = usd.price / (usd.unit || 1);
-    const totalUsd = totalToman / usdPer1;
-    return [
-      `💰 ${aStr} ${rGold.fa} = ${formatUSD(totalUsd)}$`,
-      `💶 ${formatToman(totalToman)} تومان`
-    ].join("\n");
-  }
-  return `💶 ${aStr} ${rGold.fa} = ${formatToman(totalToman)} تومان`;
+  const usdPer1Toman = usd ? (usd.price / (usd.unit || 1)) : null;
+
+  const perRefUsd = usdPer1Toman ? (perRefToman / usdPer1Toman) : null;
+  const totalUsd = usdPer1Toman ? (totalToman / usdPer1Toman) : null;
+
+  const unitLabel = refUnit > 1 ? `${refUnit} ${rGold.fa}` : `${rGold.fa}`;
+
+  const lines: string[] = [];
+  lines.push(`🟡 <b>${rGold.fa}</b>`);
+  lines.push("➖➖➖➖➖➖");
+  lines.push(`🧾 <b>واحد:</b> <code>${unitLabel}</code>`);
+  lines.push(`💶 <b>قیمت واحد:</b> <code>${formatToman(Math.round(perRefToman))}</code> تومان${perRefUsd != null ? ` (≈ <code>${formatUSD(perRefUsd)}</code> $)` : ""}`);
+  lines.push(`🧮 <b>تعداد:</b> <code>${qty}</code>`);
+  lines.push(`✅ <b>جمع کل:</b> <code>${formatToman(Math.round(totalToman))}</code> تومان${totalUsd != null ? ` (≈ <code>${formatUSD(totalUsd)}</code> $)` : ""}`);
+  return lines.join("\n");
 }
+
 
 const START_KEYBOARD = {
   inline_keyboard: [
