@@ -9,6 +9,16 @@ const BOT_USERNAME = "worker093578bot";
 
 const PRICES_JSON_URL = "https://raw.githubusercontent.com/joestar9/price-scraper/refs/heads/main/merged_prices.json";
 
+const RATES_CACHE_TTL_SECONDS = 30 * 60;
+const RATES_STALE_AFTER_MS = RATES_CACHE_TTL_SECONDS * 1000;
+
+let MEM_STORED: Stored | null = null;
+let MEM_STORED_LOADED_AT_MS = 0;
+let MEM_LOAD_PROMISE: Promise<Stored> | null = null;
+
+let MEM_TEXT_CACHE = new Map<string, { fetchedAtMs: number; text: string }>();
+let MEM_ITEMS_CACHE = new Map<string, { fetchedAtMs: number; items: PriceListItem[] }>();
+
 const COBALT_INSTANCES = [
   "https://cobalt-api.meowing.de",
   "https://cobalt-backend.canine.tools",
@@ -211,6 +221,53 @@ async function sha256Hex(s: string) {
   return Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
+function sleepMs(ms: number) {
+  return new Promise<void>(r => setTimeout(r, ms));
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: ctrl.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+function isRetryableStatus(status: number) {
+  return status === 429 || (status >= 500 && status <= 599);
+}
+
+async function fetchJsonWithRetry<T>(url: string, init: RequestInit, timeoutMs = 12000, retries = 1): Promise<T> {
+  let lastErr: any = null;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetchWithTimeout(url, init, timeoutMs);
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        const err = new Error(`HTTP ${res.status} ${body ? body.slice(0, 200) : ""}`.trim());
+        (err as any).status = res.status;
+        if (attempt < retries && isRetryableStatus(res.status)) {
+          await sleepMs(150 * (attempt + 1));
+          continue;
+        }
+        throw err;
+      }
+      return (await res.json()) as T;
+    } catch (e: any) {
+      lastErr = e;
+      const status = typeof e?.status === "number" ? e.status : null;
+      if (attempt < retries && (status == null || isRetryableStatus(status))) {
+        await sleepMs(150 * (attempt + 1));
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw lastErr;
+}
+
 function toNum(v: any): number | null {
   if (v == null) return null;
   if (typeof v === "number" && Number.isFinite(v)) return v;
@@ -259,15 +316,8 @@ function parseCSV(text: string) {
 async function fetchAndMergeData(env: Env): Promise<{ stored: Stored; rawHash: string }> {
   const headers = { "User-Agent": "Mozilla/5.0" };
 
-  const res = await fetch(PRICES_JSON_URL, { headers });
-  if (!res.ok) {
-    throw new Error(`Failed to fetch merged prices: HTTP ${res.status}`);
-  }
-
-  const rawText = await res.text();
-  const rawHash = await sha256Hex(rawText);
-
-  const arr = JSON.parse(rawText) as Array<{ name: string; price: string | number }>;
+  const arr = await fetchJsonWithRetry<Array<{ name: string; price: string | number }>>(PRICES_JSON_URL, { headers }, 12000, 2);
+  const rawHash = await sha256Hex(JSON.stringify(arr));
   const rates: Record<string, Rate> = {};
   const fetchedAtMs = Date.now();
 
@@ -434,11 +484,11 @@ async function refreshRates(env: Env) {
   const prevHash = await env.BOT_KV.get(KEY_HASH);
   const changed = prevHash !== rawHash;
   if (changed) {
-    await env.BOT_KV.put(KEY_HASH, rawHash);
-    await env.BOT_KV.put(KEY_RATES, JSON.stringify(stored));
+    await env.BOT_KV.put(KEY_HASH, rawHash, { expirationTtl: RATES_CACHE_TTL_SECONDS });
+    await env.BOT_KV.put(KEY_RATES, JSON.stringify(stored), { expirationTtl: RATES_CACHE_TTL_SECONDS });
   } else {
     const prev = await env.BOT_KV.get(KEY_RATES);
-    if (!prev) await env.BOT_KV.put(KEY_RATES, JSON.stringify(stored));
+    if (!prev) await env.BOT_KV.put(KEY_RATES, JSON.stringify(stored), { expirationTtl: RATES_CACHE_TTL_SECONDS });
   }
   return { ok: true, changed, count: Object.keys(stored.rates).length };
 }
@@ -744,6 +794,20 @@ async function processCobaltResponse(env: Env, chatId: number, data: any, replyT
   }
 }
 
+function getCachedText(key: string, fetchedAtMs: number) {
+  const v = MEM_TEXT_CACHE.get(key);
+  if (v && v.fetchedAtMs === fetchedAtMs) return v.text;
+  return null;
+}
+
+function setCachedText(key: string, fetchedAtMs: number, text: string) {
+  MEM_TEXT_CACHE.set(key, { fetchedAtMs, text });
+  if (MEM_TEXT_CACHE.size > 80) {
+    const it = MEM_TEXT_CACHE.keys().next();
+    if (!it.done) MEM_TEXT_CACHE.delete(it.value);
+  }
+}
+
 function chunkText(s: string, maxLen = 3500) {
   const out: string[] = [];
   for (let i = 0; i < s.length; i += maxLen) out.push(s.slice(i, i + maxLen));
@@ -751,19 +815,46 @@ function chunkText(s: string, maxLen = 3500) {
 }
 
 async function getStoredOrRefresh(env: Env, ctx: ExecutionContext): Promise<Stored> {
-  const txt = await env.BOT_KV.get(KEY_RATES);
-  if (txt) {
-    const stored = JSON.parse(txt) as Stored;
-    if (Date.now() - stored.fetchedAtMs > 35 * 60_000) ctx.waitUntil(refreshRates(env).catch(() => {}));
-    return stored;
+  const now = Date.now();
+
+  if (MEM_STORED && now - MEM_STORED.fetchedAtMs <= RATES_STALE_AFTER_MS) return MEM_STORED;
+
+  if (MEM_LOAD_PROMISE) return MEM_LOAD_PROMISE;
+
+  MEM_LOAD_PROMISE = (async () => {
+    if (MEM_STORED && now - MEM_STORED.fetchedAtMs > RATES_STALE_AFTER_MS) {
+      ctx.waitUntil(refreshRates(env).catch(() => {}));
+      return MEM_STORED;
+    }
+
+    const txt = await env.BOT_KV.get(KEY_RATES);
+    if (txt) {
+      const stored = JSON.parse(txt) as Stored;
+      MEM_STORED = stored;
+      MEM_STORED_LOADED_AT_MS = Date.now();
+      if (Date.now() - stored.fetchedAtMs > RATES_STALE_AFTER_MS) ctx.waitUntil(refreshRates(env).catch(() => {}));
+      return stored;
+    }
+
+    await refreshRates(env);
+    const txt2 = await env.BOT_KV.get(KEY_RATES);
+    if (!txt2) throw new Error("no data");
+    const stored2 = JSON.parse(txt2) as Stored;
+    MEM_STORED = stored2;
+    MEM_STORED_LOADED_AT_MS = Date.now();
+    return stored2;
+  })();
+
+  try {
+    return await MEM_LOAD_PROMISE;
+  } finally {
+    MEM_LOAD_PROMISE = null;
   }
-  await refreshRates(env);
-  const txt2 = await env.BOT_KV.get(KEY_RATES);
-  if (!txt2) throw new Error("no data");
-  return JSON.parse(txt2) as Stored;
 }
 
 function buildAll(stored: Stored) {
+  const cached = getCachedText("all", stored.fetchedAtMs);
+  if (cached) return cached;
   const rates = stored.rates;
   const codes = Object.keys(rates);
   
@@ -839,7 +930,9 @@ function buildAll(stored: Stored) {
   const timeStr = date.toISOString().substr(11, 5);
   lines.push("\n🕐 <b>بروزرسانی:</b> " + timeStr);
 
-  return lines.join("\n");
+  const text = lines.join("\n");
+  setCachedText("all", stored.fetchedAtMs, text);
+  return text;
 }
 
 
@@ -890,6 +983,9 @@ function shortColText(s: string, max = 18) {
 }
 
 function buildPriceItems(stored: Stored, category: PriceCategory): PriceListItem[] {
+  const cacheKey = "items:" + category;
+  const cached = MEM_ITEMS_CACHE.get(cacheKey);
+  if (cached && cached.fetchedAtMs === stored.fetchedAtMs) return cached.items;
   const rates = stored.rates;
   const codes = Object.keys(rates);
 
@@ -1010,6 +1106,9 @@ function buildPriceDetailText(stored: Stored, category: PriceCategory, code: str
 
   if (category === "crypto") {
     const usdP = r.usdPrice != null ? formatUSD(r.usdPrice) : "?";
+    const change = r.change24h ?? 0;
+    const changeEmoji = change >= 0 ? "🟢" : "🔴";
+    const changeStr = Math.abs(change).toFixed(2) + "%";
 
     const meta = CRYPTO_META[code] ?? { emoji: (r.emoji || "💎"), fa: (r.fa || r.title || code.toUpperCase()) };
 
@@ -1017,6 +1116,7 @@ function buildPriceDetailText(stored: Stored, category: PriceCategory, code: str
       `${meta.emoji} <b>${meta.fa}</b> (${code.toUpperCase()})`,
       `💶 قیمت: <code>${toman}</code> تومان`,
       `💵 قیمت دلاری: <code>${usdP}</code> $`,
+      `📈 تغییر 24ساعته: ${changeEmoji} <b>${changeStr}</b>`,
       "",
       `🕐 <b>بروزرسانی:</b> ${getUpdateTimeStr(stored)}`
     ].join("\n");
