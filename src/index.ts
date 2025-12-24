@@ -126,7 +126,7 @@ const ALIASES: Array<{ keys: string[]; code: string }> = [
   { keys: ["رینگیت", "مالزی", "myr", "ringgit"], code: "myr" },
   { keys: ["روپیه هند", "هند", "inr", "indianrupee"], code: "inr" },
 
-  { keys: ["طلا", "gold", "گرم طلا", "گرمطلای18", "طلای18", "طلای ۱۸", "۱۸"], code: "gold_gram_18k" },
+  { keys: ["طلا", "gold", "گرم طلا", "گرمطلای18", "طلای18", "طلای ۱۸", "ذهب"], code: "gold_gram_18k" },
   { keys: ["مثقال", "مثقالطلا", "mithqal"], code: "gold_mithqal" },
   { keys: ["اونس", "انس", "اونس طلا", "goldounce", "ounce"], code: "gold_ounce" },
   { keys: ["سکه", "coin", "سکه امامی", "امامی", "coin_emami"], code: "coin_emami" },
