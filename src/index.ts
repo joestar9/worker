@@ -31,7 +31,6 @@ const PARSE_TTL_MS = 15_000;
 const CONTEXT_TTL_MS = 60_000;
 const PARSE_CACHE_MAX = 5_000;
 
-const REFRESH_INTERVAL_MS = 30 * 60_000;
 const BG_REFRESH_AT_MS = 29 * 60_000;
 const FORCE_REFRESH_AT_MS = 45 * 60_000;
 
@@ -550,7 +549,7 @@ const NAME_TO_CODE: Record<string, { code: string; kind: Rate["kind"]; fa: strin
   "cosmos": { code: "atom", kind: "crypto", fa: "کازماس", emoji: "💎" },
 };
 
-async function fetchAndMergeData(env: Env): Promise<{ stored: Stored; rawHash: string }> {
+async function fetchAndMergeData(_env: Env): Promise<{ stored: Stored; rawHash: string }> {
   const res = await fetch(PRICES_JSON_URL, { headers: UA_HEADERS });
   if (!res.ok) throw new Error(`Failed to fetch merged prices: HTTP ${res.status}`);
   const rawText = await res.text();
@@ -930,7 +929,7 @@ function getHelpMessage() {
 2️⃣ <b>کریپتو:</b> نام ارز دیجیتال را بفرستید (بیت کوین، اتریوم، BTC، TON).
 3️⃣ <b>تبدیل:</b> مقدار + نام ارز (مثلاً: ۱۰۰ دلار، 0.5 بیت کوین).
 4️⃣ <b>طلا و سکه:</b> کلمه «طلا»، «سکه» یا «مثقال» را بفرستید.
-5️⃣ <b>دانلود اینستاگرام:</b> لینک پست را بفرستید.
+5️⃣ <b>دانلود اینستاگرام/توییتر/X:</b> لینک پست را بفرستید.
 
 🔸 قیمت‌های کریپتو هم به دلار و هم به تومان محاسبه می‌شوند.
 🔸 نرخ تتر/دلار از بازار آزاد گرفته می‌شود.`;
@@ -943,6 +942,27 @@ const COBALT_HEADERS: Record<string, string> = {
   Origin: "https://cobalt.tools",
   Referer: "https://cobalt.tools/",
 };
+
+function pickCobaltUrl(text: string): string | null {
+  const m = text.match(/https?:\/\/[^\s<>()]+/i);
+  if (!m) return null;
+  const raw = m[0].replace(/[)\]}>,.!?؟؛:]+$/g, "");
+  try {
+    const u = new URL(raw);
+    const h = u.hostname.toLowerCase();
+    const ok =
+      h === "instagram.com" || h.endsWith(".instagram.com") ||
+      h === "twitter.com" || h.endsWith(".twitter.com") ||
+      h === "x.com" || h.endsWith(".x.com") ||
+      h === "t.co" ||
+      h === "fxtwitter.com" ||
+      h === "vxtwitter.com" ||
+      h === "fixupx.com";
+    return ok ? u.toString() : null;
+  } catch {
+    return null;
+  }
+}
 
 async function processCobaltResponse(tg: Telegram, chatId: number, data: any, replyTo?: number) {
   if (data?.status === "error") throw new Error(data.text || "Cobalt Error");
@@ -961,10 +981,7 @@ async function processCobaltResponse(tg: Telegram, chatId: number, data: any, re
   throw new Error("Unknown response");
 }
 
-async function handleInstagram(tg: Telegram, chatId: number, text: string, replyTo?: number) {
-  const urlMatch = text.match(/(https?:\/\/(?:www\.)?instagram\.com\/[^ \n]+)/);
-  if (!urlMatch) return false;
-  const targetUrl = urlMatch[1];
+async function handleCobalt(tg: Telegram, chatId: number, targetUrl: string, replyTo?: number) {
   await tg.sendChatAction(chatId, "upload_video");
   const endpointsForBase = (baseUrl: string) => {
     const base = baseUrl.replace(/\/+$/, "");
@@ -974,7 +991,11 @@ async function handleInstagram(tg: Telegram, chatId: number, text: string, reply
     const endpoints = endpointsForBase(baseUrl);
     for (const endpoint of endpoints) {
       try {
-        const apiRes = await fetch(endpoint, { method: "POST", headers: COBALT_HEADERS, body: JSON.stringify({ url: targetUrl, vCodec: "h264" }) });
+        const apiRes = await fetch(endpoint, {
+          method: "POST",
+          headers: COBALT_HEADERS,
+          body: JSON.stringify({ url: targetUrl, vCodec: "h264" }),
+        });
         if (!apiRes.ok) throw new Error(`HTTP ${apiRes.status}`);
         const data = await apiRes.json<any>();
         await processCobaltResponse(tg, chatId, data, replyTo);
@@ -994,16 +1015,13 @@ async function handleCallback(update: any, env: Env, ctx: ExecutionContext, tg: 
   const data: string = cb.data || "";
   const chatId: number | undefined = cb.message?.chat?.id;
   const messageId: number | undefined = cb.message?.message_id;
-  if (data === "help_menu" || data === "start_menu" || data === "noop" || data === "get_all_prices") {
-    await tg.answerCallbackQuery(cb.id);
-  } else if (data.startsWith("cat:")) {
-    await tg.answerCallbackQuery(cb.id, "در حال دریافت قیمت‌ها...");
-  } else if (data.startsWith("show:")) {
-    await tg.answerCallbackQuery(cb.id, "📩 ارسال شد");
-  } else {
-    await tg.answerCallbackQuery(cb.id);
-  }
+
+  if (data.startsWith("cat:")) await tg.answerCallbackQuery(cb.id, "در حال دریافت قیمت‌ها...");
+  else if (data.startsWith("show:")) await tg.answerCallbackQuery(cb.id, "📩 ارسال شد");
+  else await tg.answerCallbackQuery(cb.id);
+
   if (!chatId || !messageId) return;
+
   if (data === "help_menu") {
     await tg.editMessageText(chatId, messageId, getHelpMessage(), HELP_KEYBOARD);
     return;
@@ -1013,6 +1031,7 @@ async function handleCallback(update: any, env: Env, ctx: ExecutionContext, tg: 
     return;
   }
   if (data === "noop") return;
+
   if (data.startsWith("cat:")) {
     const category = data.split(":")[1] as PriceCategory;
     const stored = await getStoredOrRefresh(env, ctx);
@@ -1025,6 +1044,7 @@ async function handleCallback(update: any, env: Env, ctx: ExecutionContext, tg: 
     await tg.editMessageText(chatId, messageId, text, kb);
     return;
   }
+
   if (data.startsWith("page:")) {
     const parts = data.split(":");
     const category = parts[1] as PriceCategory;
@@ -1039,6 +1059,7 @@ async function handleCallback(update: any, env: Env, ctx: ExecutionContext, tg: 
     await tg.editMessageText(chatId, messageId, text, kb);
     return;
   }
+
   if (data.startsWith("show:")) {
     const parts = data.split(":");
     const category = parts[1] as PriceCategory;
@@ -1048,6 +1069,7 @@ async function handleCallback(update: any, env: Env, ctx: ExecutionContext, tg: 
     await tg.sendMessage(chatId, text);
     return;
   }
+
   if (data === "get_all_prices") {
     await tg.editMessageText(chatId, messageId, "📌 یک دسته‌بندی را انتخاب کنید:", START_KEYBOARD);
     return;
@@ -1062,9 +1084,11 @@ async function handleMessage(update: any, env: Env, ctx: ExecutionContext, tg: T
   const messageId: number | undefined = msg?.message_id;
   const userId: number | undefined = msg?.from?.id;
   if (!chatId || !text || !userId) return;
+
   const msgDate = msg.date;
   const nowSec = Math.floor(Date.now() / 1000);
   if (nowSec - msgDate > 40) return;
+
   const isGroup = msg?.chat?.type === "group" || msg?.chat?.type === "supergroup";
   const replyTo = isGroup ? messageId : undefined;
 
@@ -1083,16 +1107,17 @@ async function handleMessage(update: any, env: Env, ctx: ExecutionContext, tg: T
   cooldownMem.set(userId, now + COOLDOWN_TTL_MS);
   ctx.waitUntil(env.BOT_KV.put(cooldownKey, "1", { expirationTtl: Math.ceil(COOLDOWN_TTL_MS / 1000) }));
 
-  const textNorm = norm(text);
-  const cmd = normalizeCommand(textNorm);
-
-  if (text.includes("instagram.com")) {
-    await handleInstagram(tg, chatId, text, replyTo);
+  const cobaltUrl = pickCobaltUrl(text);
+  if (cobaltUrl) {
+    await handleCobalt(tg, chatId, cobaltUrl, replyTo);
     return;
   }
 
+  const textNorm = norm(text);
+  const cmd = normalizeCommand(textNorm);
+
   if (cmd === "/start") {
-    await tg.sendMessage(chatId, "👋 سلام! به ربات [ارز چی؟] خوش آمدید.\n\nمن می‌توانم قیمت ارزها و کریپتو را بگویم و ویدیوهای اینستاگرام را دانلود کنم.", {
+    await tg.sendMessage(chatId, "👋 سلام! به ربات [ارز چی؟] خوش آمدید.\n\nمن می‌توانم قیمت ارزها و کریپتو را بگویم و ویدیوهای اینستاگرام/توییتر را دانلود کنم.", {
       replyTo,
       replyMarkup: START_KEYBOARD,
     });
@@ -1140,6 +1165,7 @@ export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
     if (url.pathname === "/health") return new Response("ok");
+
     if (url.pathname === "/refresh") {
       const key = url.searchParams.get("key") || "";
       if (!env.ADMIN_KEY || key !== env.ADMIN_KEY) return new Response("Unauthorized", { status: 401 });
@@ -1150,21 +1176,28 @@ export default {
         return new Response(JSON.stringify({ ok: false, error: String(e?.message ?? e) }), { headers: { "content-type": "application/json" }, status: 502 });
       }
     }
+
     if (url.pathname !== "/telegram" || req.method !== "POST") return new Response("Not Found", { status: 404 });
+
     const got = req.headers.get("X-Telegram-Bot-Api-Secret-Token") || "";
     if (got !== env.TG_SECRET) return new Response("Unauthorized", { status: 401 });
+
     const update = await req.json<any>().catch(() => null);
     if (!update) return new Response("ok");
     if (update?.edited_message) return new Response("ok");
+
     const tg = new Telegram(env.TG_TOKEN);
+
     if (update?.callback_query) {
       ctx.waitUntil(handleCallback(update, env, ctx, tg).catch(() => {}));
       return new Response("ok");
     }
+
     if (update?.message) {
       ctx.waitUntil(handleMessage(update, env, ctx, tg).catch(() => {}));
       return new Response("ok");
     }
+
     return new Response("ok");
   },
 };
