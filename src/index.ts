@@ -287,23 +287,93 @@ function containsBounded(haystack: string, needle: string) {
 }
 
 function parsePersianNumber(tokens: string[]): number | null {
-  const ones: Record<string, number> = { "یک": 1, "یه": 1, "دو": 2, "سه": 3, "چهار": 4, "پنج": 5, "شش": 6, "شیش": 6, "هفت": 7, "هشت": 8, "نه": 9 };
-  const teens: Record<string, number> = { "ده": 10, "یازده": 11, "دوازده": 12, "سیزده": 13, "چهارده": 14, "پانزده": 15, "شانزده": 16, "هفده": 17, "هجده": 18, "نوزده": 19 };
-  const tens: Record<string, number> = { "بیست": 20, "سی": 30, "چهل": 40, "پنجاه": 50, "شصت": 60, "هفتاد": 70, "هشتاد": 80, "نود": 90 };
-  const hundreds: Record<string, number> = { "صد": 100, "یکصد": 100, "دویست": 200, "سیصد": 300, "چهارصد": 400, "پانصد": 500, "ششصد": 600, "شیشصد": 600, "هفتصد": 700, "هشتصد": 800, "نهصد": 900 };
-  const scales: Record<string, number> = { "هزار": 1e3, "میلیون": 1e6, "ملیون": 1e6, "میلیارد": 1e9, "بیلیون": 1e9, "تریلیون": 1e12 };
+  const ones: Record<string, number> = {
+    "یک": 1,
+    "یه": 1,
+    "دو": 2,
+    "سه": 3,
+    "چهار": 4,
+    "پنج": 5,
+    "شش": 6,
+    "شیش": 6,
+    "هفت": 7,
+    "هشت": 8,
+    "نه": 9,
+  };
+  const teens: Record<string, number> = {
+    "ده": 10,
+    "یازده": 11,
+    "دوازده": 12,
+    "سیزده": 13,
+    "چهارده": 14,
+    "پانزده": 15,
+    "شانزده": 16,
+    "هفده": 17,
+    "هجده": 18,
+    "نوزده": 19,
+  };
+  const tens: Record<string, number> = {
+    "بیست": 20,
+    "سی": 30,
+    "چهل": 40,
+    "پنجاه": 50,
+    "شصت": 60,
+    "هفتاد": 70,
+    "هشتاد": 80,
+    "نود": 90,
+  };
+  const hundreds: Record<string, number> = {
+    "صد": 100,
+    "یکصد": 100,
+    "دویست": 200,
+    "سیصد": 300,
+    "چهارصد": 400,
+    "پانصد": 500,
+    "ششصد": 600,
+    "شیشصد": 600,
+    "هفتصد": 700,
+    "هشتصد": 800,
+    "نهصد": 900,
+  };
+  const scales: Record<string, number> = {
+    "هزار": 1e3,
+    "میلیون": 1e6,
+    "ملیون": 1e6,
+    "میلیارد": 1e9,
+    "بیلیون": 1e9,
+    "تریلیون": 1e12,
+  };
+
   const t = tokens.map((x) => x.trim()).filter((x) => x && x !== "و");
   if (t.length === 0) return null;
+
   let total = 0;
   let current = 0;
+
   const addSmall = (w: string) => {
-    if (hundreds[w] != null) { current += hundreds[w]; return true; }
-    if (teens[w] != null) { current += teens[w]; return true; }
-    if (tens[w] != null) { current += tens[w]; return true; }
-    if (ones[w] != null) { current += ones[w]; return true; }
-    if (w === "صد") { current = (current || 1) * 100; return true; }
+    if (hundreds[w] != null) {
+      current += hundreds[w];
+      return true;
+    }
+    if (teens[w] != null) {
+      current += teens[w];
+      return true;
+    }
+    if (tens[w] != null) {
+      current += tens[w];
+      return true;
+    }
+    if (ones[w] != null) {
+      current += ones[w];
+      return true;
+    }
+    if (w === "صد") {
+      current = (current || 1) * 100;
+      return true;
+    }
     return false;
   };
+
   for (const w of t) {
     if (scales[w] != null) {
       const scale = scales[w];
@@ -314,13 +384,16 @@ function parsePersianNumber(tokens: string[]): number | null {
     }
     if (!addSmall(w)) return null;
   }
+
   total += current;
   return total > 0 ? total : null;
 }
 
 function parseDigitsWithScale(text: string): number | null {
   const t = normalizeDigits(text);
-  const m = t.match(/(\d+(?:\.\d+)?)(?:\s*(هزار|میلیون|ملیون|میلیارد|بیلیون|تریلیون|k|m|b))?/i);
+  const m = t.match(
+    /(\d+(?:\.\d+)?)(?:\s*(هزار|میلیون|ملیون|میلیارد|بیلیون|تریلیون|k|m|b))?/i,
+  );
   if (!m) return null;
   const num = Number(m[1]);
   if (!Number.isFinite(num) || num <= 0) return null;
@@ -341,25 +414,40 @@ function parseDigitsWithScale(text: string): number | null {
 function findCode(textNorm: string, rates: Record<string, Rate>) {
   const cleaned = stripPunct(textNorm).replace(/\s+/g, " ").trim();
   const compact = cleaned.replace(/\s+/g, "");
+
   for (const a of ALIAS_INDEX) {
     for (const k of a.spaced) if (containsBounded(cleaned, k)) return a.code;
     for (const k of a.compact) if (containsBounded(compact, k)) return a.code;
   }
-  if (containsBounded(cleaned, "دلار") && (containsBounded(cleaned, "کانادا") || containsBounded(cleaned, "کاندا") || containsBounded(cleaned, "کانادایی") || containsBounded(cleaned, "کاندایی"))) {
+
+  if (
+    containsBounded(cleaned, "دلار") &&
+    (containsBounded(cleaned, "کانادا") ||
+      containsBounded(cleaned, "کاندا") ||
+      containsBounded(cleaned, "کانادایی") ||
+      containsBounded(cleaned, "کاندایی"))
+  ) {
     if (rates["cad"]) return "cad";
   }
-  if (containsBounded(cleaned, "دینار") && (containsBounded(cleaned, "عراق") || containsBounded(cleaned, "عراقی"))) {
+
+  if (
+    containsBounded(cleaned, "دینار") &&
+    (containsBounded(cleaned, "عراق") || containsBounded(cleaned, "عراقی"))
+  ) {
     if (rates["iqd"]) return "iqd";
   }
+
   const m = cleaned.match(/\b([a-z]{3,10})\b/i);
   if (m) {
     const candidate = m[1].toLowerCase();
     if (rates[candidate]) return candidate;
   }
+
   for (const key in rates) {
     const t = rates[key]?.title ? stripPunct(norm(rates[key].title)).replace(/\s+/g, "") : "";
     if (compact === key || (t && compact === t)) return key;
   }
+
   return null;
 }
 
@@ -367,14 +455,17 @@ function extractAmountOrNull(textNorm: string): number | null {
   const cleaned = stripPunct(textNorm).replace(/\s+/g, " ").trim();
   const digitScaled = parseDigitsWithScale(cleaned);
   if (digitScaled != null && digitScaled > 0) return digitScaled;
+
   const tokens = cleaned.split(" ").filter(Boolean);
   const maxWin = Math.min(tokens.length, 10);
+
   for (let w = maxWin; w >= 1; w--) {
     for (let i = 0; i + w <= tokens.length; i++) {
       const n = parsePersianNumber(tokens.slice(i, i + w));
       if (n != null && n > 0) return n;
     }
   }
+
   return null;
 }
 
@@ -399,15 +490,19 @@ function getParsedIntent(userId: number, textNorm: string, rates: Record<string,
   const cacheKey = `${userId}:${textNorm}`;
   const cached = parseCache.get(cacheKey);
   if (cached && now - cached.ts <= PARSE_TTL_MS) return cached;
+
   let code = findCode(textNorm, rates);
   const amountOrNull = extractAmountOrNull(textNorm);
   const hasAmount = amountOrNull != null;
   const amount = amountOrNull ?? 1;
+
   if (!code) {
     const ctx = userContext.get(userId);
     if (ctx && now - ctx.ts <= CONTEXT_TTL_MS && hasAmount) code = ctx.code;
   }
+
   if (code) userContext.set(userId, { ts: now, code });
+
   const out = { ts: now, code: code ?? null, amount, hasAmount };
   parseCache.set(cacheKey, out);
   return out;
@@ -597,6 +692,7 @@ async function fetchAndMergeData(_env: Env): Promise<{ stored: Stored; rawHash: 
 
   for (const row of arr) {
     if (!row?.name) continue;
+
     const { unit, cleanName } = extractUnitFromName(String(row.name));
     const nameLower = cleanName.toLowerCase();
     const priceNum = parseNumberLoose(row.price);
@@ -732,8 +828,8 @@ function buildAll(stored: Stored) {
     if (rA.kind === "crypto") {
       const idxA = CRYPTO_PRIORITY.indexOf(a), idxB = CRYPTO_PRIORITY.indexOf(b);
       if (idxA !== -1 && idxB !== -1) return idxA - idxB;
-      if (idxA !== -1) return -1;
       if (idxB !== -1) return 1;
+      if (idxA !== -1) return -1;
     }
     return a.localeCompare(b);
   });
@@ -753,15 +849,12 @@ function buildAll(stored: Stored) {
 
     const { showUnit, baseAmount, baseToman } = getDisplayBaseForFiat(r);
     const priceStr = formatToman(baseToman);
-
     const meta = META[c] ?? { emoji: "💱", fa: r.title || c.toUpperCase() };
     const usd = stored.rates["usd"];
     const usdPer1 = usd ? usd.price / Math.max(1, usd.unit || 1) : null;
     const usdEq = usdPer1 && c !== "usd" && r.kind === "currency" ? baseToman / usdPer1 : null;
-
     const unitPrefix = showUnit ? `${baseAmount} ` : "";
     const usdPart = usdEq != null ? ` (≈ $${formatUSD(usdEq)})` : "";
-
     const line = `${meta.emoji} <b>${unitPrefix}${meta.fa}:</b> \u200E<code>${priceStr}</code> تومان${usdPart}`;
     if (r.kind === "gold" || c.includes("coin") || c.includes("gold")) goldItems.push(line);
     else currencyItems.push(line);
@@ -1030,9 +1123,12 @@ function pickCobaltUrl(text: string): string | null {
     const u = new URL(raw);
     const h = u.hostname.toLowerCase();
     const ok =
-      h === "instagram.com" || h.endsWith(".instagram.com") ||
-      h === "twitter.com" || h.endsWith(".twitter.com") ||
-      h === "x.com" || h.endsWith(".x.com") ||
+      h === "instagram.com" ||
+      h.endsWith(".instagram.com") ||
+      h === "twitter.com" ||
+      h.endsWith(".twitter.com") ||
+      h === "x.com" ||
+      h.endsWith(".x.com") ||
       h === "t.co" ||
       h === "fxtwitter.com" ||
       h === "vxtwitter.com" ||
@@ -1072,42 +1168,33 @@ function extractCobaltCaption(data: any): string | null {
 
 function buildCobaltCaption(sourceUrl: string, captionText: string | null) {
   const linkPart = `🔗 <a href="${escapeAttr(sourceUrl)}">منبع</a>`;
-  if (!captionText) {
-    const out = `✅ دانلود شد\n${linkPart}`;
-    return truncate(out, MAX_MEDIA_CAPTION_LEN);
-  }
-  let cap = escapeHtml(cleanText(captionText));
-  let out = `✅ دانلود شد\n\n📝 ${cap}\n\n${linkPart}`;
-  if (out.length > MAX_MEDIA_CAPTION_LEN) {
-    const overflow = out.length - MAX_MEDIA_CAPTION_LEN;
-    const newLen = Math.max(0, cap.length - overflow - 1);
-    cap = cap.slice(0, newLen) + "…";
-    out = `✅ دانلود شد\n\n📝 ${cap}\n\n${linkPart}`;
-  }
-  return out;
+  const cap = captionText ? escapeHtml(cleanText(captionText)) : "";
+  const out = cap ? `${cap}\n\n${linkPart}` : linkPart;
+  return truncate(out, MAX_MEDIA_CAPTION_LEN);
 }
 
 async function processCobaltResponse(tg: Telegram, chatId: number, data: any, sourceUrl: string, replyTo?: number) {
   if (data?.status === "error") throw new Error(data.text || "Cobalt Error");
 
   const overallCaptionRaw = extractCobaltCaption(data);
-  const overallCaption = buildCobaltCaption(sourceUrl, overallCaptionRaw);
 
   if (data?.status === "stream" || data?.status === "redirect") {
-    await tg.sendVideo(chatId, data.url, overallCaption, replyTo);
+    const cap = buildCobaltCaption(sourceUrl, overallCaptionRaw);
+    await tg.sendVideo(chatId, data.url, cap, replyTo);
     return;
   }
 
   if (data?.status === "picker" && Array.isArray(data.picker) && data.picker.length > 0) {
     const items = data.picker.slice(0, 4);
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i];
+    for (const item of items) {
       const itemCapRaw =
         (typeof item?.caption === "string" && cleanText(item.caption)) ||
         (typeof item?.description === "string" && cleanText(item.description)) ||
         (typeof item?.title === "string" && cleanText(item.title)) ||
         null;
-      const cap = i === 0 ? buildCobaltCaption(sourceUrl, itemCapRaw ?? overallCaptionRaw) : "";
+
+      const cap = buildCobaltCaption(sourceUrl, itemCapRaw ?? overallCaptionRaw);
+
       if (item?.type === "video") await tg.sendVideo(chatId, item.url, cap, replyTo);
       else if (item?.type === "photo") await tg.sendPhoto(chatId, item.url, cap, replyTo);
     }
@@ -1263,10 +1350,11 @@ async function handleMessage(update: any, env: Env, ctx: ExecutionContext, tg: T
   const cmd = normalizeCommand(textNorm);
 
   if (cmd === "/start") {
-    await tg.sendMessage(chatId, "👋 سلام! به ربات [ارز چی؟] خوش آمدید.\n\nمن می‌توانم قیمت ارزها و کریپتو را بگویم و ویدیوهای اینستاگرام/توییتر را دانلود کنم.", {
-      replyTo,
-      replyMarkup: START_KEYBOARD,
-    });
+    await tg.sendMessage(
+      chatId,
+      "👋 سلام! به ربات [ارز چی؟] خوش آمدید.\n\nمن می‌توانم قیمت ارزها و کریپتو را بگویم و ویدیوهای اینستاگرام/توییتر را دانلود کنم.",
+      { replyTo, replyMarkup: START_KEYBOARD },
+    );
     return;
   }
 
@@ -1323,7 +1411,10 @@ export default {
         const r = await refreshRates(env);
         return new Response(JSON.stringify(r), { headers: { "content-type": "application/json" } });
       } catch (e: any) {
-        return new Response(JSON.stringify({ ok: false, error: String(e?.message ?? e) }), { headers: { "content-type": "application/json" }, status: 502 });
+        return new Response(JSON.stringify({ ok: false, error: String(e?.message ?? e) }), {
+          headers: { "content-type": "application/json" },
+          status: 502,
+        });
       }
     }
 
