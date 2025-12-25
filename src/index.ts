@@ -39,6 +39,8 @@ const MEM_STORED_TTL_MS = 5_000;
 const COOLDOWN_TTL_MS = 5_000;
 const COOLDOWN_MEM_MAX = 20_000;
 
+const MAX_MEDIA_CAPTION_LEN = 950;
+
 const TG_JSON_HEADERS = { "content-type": "application/json" } as const;
 const UA_HEADERS = { "User-Agent": "Mozilla/5.0" } as const;
 
@@ -234,6 +236,30 @@ function formatToman(n: number) {
 function formatUSD(n: number) {
   if (n < 1) return n.toFixed(4);
   return n.toLocaleString("en-US", { maximumFractionDigits: 2 });
+}
+
+function escapeHtml(s: string) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function escapeAttr(s: string) {
+  return escapeHtml(s).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+function cleanText(s: string) {
+  return s
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .replace(/\u0000/g, "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
+function truncate(s: string, max: number) {
+  if (s.length <= max) return s;
+  return s.slice(0, Math.max(0, max - 1)) + "…";
 }
 
 async function sha256Hex(s: string) {
@@ -558,6 +584,7 @@ async function fetchAndMergeData(_env: Env): Promise<{ stored: Stored; rawHash: 
   const rates: Record<string, Rate> = {};
   const fetchedAtMs = Date.now();
   let usdToman: number | null = null;
+
   for (const row of arr) {
     if (!row?.name) continue;
     const { cleanName } = extractUnitFromName(String(row.name));
@@ -567,18 +594,22 @@ async function fetchAndMergeData(_env: Env): Promise<{ stored: Stored; rawHash: 
       break;
     }
   }
+
   for (const row of arr) {
     if (!row?.name) continue;
     const { unit, cleanName } = extractUnitFromName(String(row.name));
     const nameLower = cleanName.toLowerCase();
     const priceNum = parseNumberLoose(row.price);
     if (priceNum == null) continue;
+
     const mapped = NAME_TO_CODE[nameLower];
     const code = mapped?.code ?? normalizeKeyFromTitle(cleanName);
+
     let kind: Rate["kind"] = mapped?.kind ?? "currency";
     let tomanPrice = priceNum;
     let usdPrice: number | undefined;
     let change24h: number | undefined;
+
     const maybeChange =
       (row as any)?.percent_change_24h ??
       (row as any)?.percentChange24h ??
@@ -586,21 +617,30 @@ async function fetchAndMergeData(_env: Env): Promise<{ stored: Stored; rawHash: 
       (row as any)?.change24h ??
       (row as any)?.pct_change_24h ??
       (row as any)?.pctChange24h;
+
     const chNum = parseNumberLoose(maybeChange);
     if (chNum != null) change24h = chNum;
+
     const isCryptoNumber = typeof row.price === "number";
     const isUsdGoldProxy = nameLower === "gold ounce" || nameLower === "pax gold" || nameLower === "tether gold";
+
     if (isCryptoNumber || isUsdGoldProxy) {
       usdPrice = priceNum;
       if (usdToman != null) tomanPrice = priceNum * usdToman;
       kind = "crypto";
     }
+
     if (kind === "currency" && usdToman != null) {
       usdPrice = code === "usd" ? 1 : tomanPrice / usdToman;
     }
-    const meta = mapped ? { emoji: mapped.emoji, fa: mapped.fa } : META[code] ?? { emoji: kind === "crypto" ? "💎" : "💱", fa: cleanName };
+
+    const meta = mapped
+      ? { emoji: mapped.emoji, fa: mapped.fa }
+      : META[code] ?? { emoji: kind === "crypto" ? "💎" : "💱", fa: cleanName };
+
     rates[code] = { price: tomanPrice, unit, kind, title: cleanName, emoji: meta.emoji, fa: meta.fa, usdPrice, change24h };
   }
+
   const stored: Stored = { fetchedAtMs, source: PRICES_JSON_URL, rates };
   return { stored, rawHash };
 }
@@ -679,6 +719,7 @@ function buildAll(stored: Stored) {
   const goldItems: string[] = [];
   const currencyItems: string[] = [];
   const cryptoItems: string[] = [];
+
   codes.sort((a, b) => {
     const rA = rates[a], rB = rates[b];
     if (rA.kind !== rB.kind) return 0;
@@ -696,6 +737,7 @@ function buildAll(stored: Stored) {
     }
     return a.localeCompare(b);
   });
+
   for (const c of codes) {
     const r = rates[c];
     if (r.kind === "crypto") {
@@ -708,18 +750,23 @@ function buildAll(stored: Stored) {
       cryptoItems.push(line);
       continue;
     }
+
     const { showUnit, baseAmount, baseToman } = getDisplayBaseForFiat(r);
     const priceStr = formatToman(baseToman);
+
     const meta = META[c] ?? { emoji: "💱", fa: r.title || c.toUpperCase() };
     const usd = stored.rates["usd"];
     const usdPer1 = usd ? usd.price / Math.max(1, usd.unit || 1) : null;
     const usdEq = usdPer1 && c !== "usd" && r.kind === "currency" ? baseToman / usdPer1 : null;
+
     const unitPrefix = showUnit ? `${baseAmount} ` : "";
     const usdPart = usdEq != null ? ` (≈ $${formatUSD(usdEq)})` : "";
+
     const line = `${meta.emoji} <b>${unitPrefix}${meta.fa}:</b> \u200E<code>${priceStr}</code> تومان${usdPart}`;
     if (r.kind === "gold" || c.includes("coin") || c.includes("gold")) goldItems.push(line);
     else currencyItems.push(line);
   }
+
   const lines: string[] = [];
   if (goldItems.length > 0) lines.push("🟡 <b>نرخ طلا و سکه</b>", "➖➖➖➖➖➖", ...goldItems, "");
   if (currencyItems.length > 0) lines.push("💵 <b>نرخ ارزهای بازار</b>", "➖➖➖➖➖➖", ...currencyItems, "");
@@ -761,6 +808,7 @@ function shortColText(s: string, max = 18) {
 function buildPriceItems(stored: Stored, category: PriceCategory): PriceListItem[] {
   const rates = stored.rates;
   const codes = Object.keys(rates);
+
   if (category === "crypto") {
     const cryptoCodes = codes.filter((c) => rates[c]?.kind === "crypto");
     cryptoCodes.sort((a, b) => {
@@ -770,6 +818,7 @@ function buildPriceItems(stored: Stored, category: PriceCategory): PriceListItem
       if (idxB !== -1) return 1;
       return a.localeCompare(b);
     });
+
     const items: PriceListItem[] = [];
     for (const c of cryptoCodes) {
       const r = rates[c];
@@ -780,14 +829,17 @@ function buildPriceItems(stored: Stored, category: PriceCategory): PriceListItem
     }
     return items;
   }
+
   const goldCodes: string[] = [];
   const currencyCodes: string[] = [];
+
   for (const c of codes) {
     const r = rates[c];
     if (!r || r.kind === "crypto") continue;
     if (r.kind === "gold" || c.includes("coin") || c.includes("gold")) goldCodes.push(c);
     else currencyCodes.push(c);
   }
+
   goldCodes.sort((a, b) => a.localeCompare(b));
   currencyCodes.sort((a, b) => {
     const idxA = FIAT_PRIORITY.indexOf(a), idxB = FIAT_PRIORITY.indexOf(b);
@@ -796,8 +848,10 @@ function buildPriceItems(stored: Stored, category: PriceCategory): PriceListItem
     if (idxB !== -1) return 1;
     return a.localeCompare(b);
   });
+
   const merged = [...goldCodes, ...currencyCodes];
   const items: PriceListItem[] = [];
+
   for (const c of merged) {
     const r = rates[c];
     const { showUnit, baseAmount, baseToman } = getDisplayBaseForFiat(r);
@@ -805,20 +859,26 @@ function buildPriceItems(stored: Stored, category: PriceCategory): PriceListItem
     const meta = META[c] ?? { emoji: "💱", fa: r.title || r.fa || c.toUpperCase() };
     items.push({ code: c, category, emoji: meta.emoji, name: shortColText(showUnit ? `${baseAmount} ${meta.fa}` : meta.fa, 20), price: shortColText(`${priceStr} ت`, 16) });
   }
+
   return items;
 }
 
 function buildPricesKeyboard(category: PriceCategory, page: number, totalPages: number, items: PriceListItem[]) {
   const start = page * PRICE_PAGE_SIZE;
   const slice = items.slice(start, start + PRICE_PAGE_SIZE);
+
   const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+
   for (const it of slice) {
     const cb = `show:${category}:${it.code}:${page}`;
     rows.push([{ text: it.price, callback_data: cb }, { text: `${it.emoji} ${it.name}`, callback_data: cb }]);
   }
+
   const prevCb = page > 0 ? `page:${category}:${page - 1}` : "noop";
   const nextCb = page + 1 < totalPages ? `page:${category}:${page + 1}` : "noop";
+
   rows.push([{ text: "بعدی ⬅️", callback_data: nextCb }, { text: "🏠 خانه", callback_data: "start_menu" }, { text: "➡️ قبلی", callback_data: prevCb }]);
+
   return { inline_keyboard: rows };
 }
 
@@ -832,6 +892,7 @@ function buildPriceDetailText(stored: Stored, category: PriceCategory, code: str
   if (!r) return "❗️این آیتم پیدا نشد.";
   const { baseAmount, baseToman, showUnit } = getDisplayBaseForFiat(r);
   const toman = formatToman(baseToman);
+
   if (category === "crypto") {
     const usdP = r.usdPrice != null ? formatUSD(r.usdPrice) : "?";
     const change = r.change24h ?? 0;
@@ -840,26 +901,33 @@ function buildPriceDetailText(stored: Stored, category: PriceCategory, code: str
     const meta = CRYPTO_META[code] ?? { emoji: r.emoji || "💎", fa: r.fa || r.title || code.toUpperCase() };
     return [`${meta.emoji} <b>${meta.fa}</b> (${code.toUpperCase()})`, `💶 قیمت: <code>${toman}</code> تومان`, `💵 قیمت دلاری: <code>${usdP}</code> $`, `📈 تغییر 24ساعته: ${changeEmoji} <b>${changeStr}</b>`, "", `🕐 <b>بروزرسانی:</b> ${getUpdateTimeStr(stored)}`].join("\n");
   }
+
   const meta = META[code] ?? { emoji: "💱", fa: r.title || r.fa || code.toUpperCase() };
   const usd = stored.rates["usd"];
   const usdPer1 = usd ? usd.price / Math.max(1, usd.unit || 1) : null;
   const usdEq = usdPer1 && code !== "usd" && r.kind === "currency" ? baseToman / usdPer1 : null;
   const unitPrefix = showUnit ? `${baseAmount} ` : "";
+
   return [`${meta.emoji} <b>${unitPrefix}${meta.fa}</b>`, `💶 قیمت: <code>${toman}</code> تومان`, usdEq != null ? `💵 معادل دلار: <code>${formatUSD(usdEq)}</code> $` : "", r.unit && r.unit !== 1 ? `📦 واحد مرجع: <code>${r.unit}</code>` : "", "", `🕐 <b>بروزرسانی:</b> ${getUpdateTimeStr(stored)}`].filter(Boolean).join("\n");
 }
 
 function replyCurrency(code: string, r: Rate, amount: number, stored: Stored, hasAmount: boolean) {
   const refUnit = Math.max(1, r.unit || 1);
+
   if (r.kind === "crypto") {
     const qty = hasAmount ? amount : 1;
     const totalToman = (r.price / refUnit) * (qty * refUnit);
+
     const per1Usd = typeof r.usdPrice === "number" ? r.usdPrice : null;
     const totalUsdDirect = per1Usd ? per1Usd * qty : null;
+
     const usd = stored.rates["usd"];
     const usdPer1Toman = usd ? usd.price / Math.max(1, usd.unit || 1) : null;
     const totalUsd = totalUsdDirect ?? (usdPer1Toman ? totalToman / usdPer1Toman : null);
+
     const changeLine = typeof r.change24h === "number" ? `${r.change24h >= 0 ? "🟢" : "🔴"} <b>تغییر 24h:</b> ${r.change24h.toFixed(2)}%` : null;
     const titlePart = r.title && r.title !== r.fa ? ` <i>(${r.title})</i>` : "";
+
     const lines: string[] = [];
     lines.push(`💎 <b>${r.fa}</b>${titlePart}`);
     lines.push("➖➖➖➖➖➖");
@@ -869,18 +937,24 @@ function replyCurrency(code: string, r: Rate, amount: number, stored: Stored, ha
     if (changeLine) lines.push(changeLine);
     return lines.join("\n");
   }
+
   const refCount = hasAmount ? amount : 1;
   const baseUnits = refUnit > 1 ? refCount * refUnit : refCount;
+
   const per1Toman = r.price / refUnit;
   const totalToman = per1Toman * baseUnits;
+
   const usd = stored.rates["usd"];
   const usdPer1Toman = usd ? usd.price / Math.max(1, usd.unit || 1) : null;
   const totalUsd = usdPer1Toman ? totalToman / usdPer1Toman : null;
+
   const LRI = "\u2066";
   const RLI = "\u2067";
   const PDI = "\u2069";
+
   const meta = META[code] ?? { emoji: "💱", fa: r.fa || r.title || code.toUpperCase() };
   const titleLine = `${LRI}${refCount}${PDI} ${RLI}${meta.fa}${PDI} ${LRI}${meta.emoji}${PDI}`;
+
   const lines: string[] = [];
   lines.push(`<b>${titleLine}</b>`);
   if (code !== "usd" && totalUsd != null) lines.push(`💵 معادل دلار: <code>${formatUSD(totalUsd)}</code> $`);
@@ -891,14 +965,19 @@ function replyCurrency(code: string, r: Rate, amount: number, stored: Stored, ha
 function replyGold(rGold: Rate, amount: number, stored: Stored) {
   const refUnit = Math.max(1, rGold.unit || 1);
   const qty = amount || 1;
+
   const perRefToman = rGold.price;
   const per1Toman = rGold.price / refUnit;
   const totalToman = per1Toman * (qty * refUnit);
+
   const usd = stored.rates["usd"];
   const usdPer1Toman = usd ? usd.price / Math.max(1, usd.unit || 1) : null;
+
   const perRefUsd = usdPer1Toman ? perRefToman / usdPer1Toman : null;
   const totalUsd = usdPer1Toman ? totalToman / usdPer1Toman : null;
+
   const unitLabel = refUnit > 1 ? `${refUnit} ${rGold.fa}` : `${rGold.fa}`;
+
   const lines: string[] = [];
   lines.push(`🟡 <b>${rGold.fa}</b>`);
   lines.push("➖➖➖➖➖➖");
@@ -964,29 +1043,88 @@ function pickCobaltUrl(text: string): string | null {
   }
 }
 
-async function processCobaltResponse(tg: Telegram, chatId: number, data: any, replyTo?: number) {
+function extractCobaltCaption(data: any): string | null {
+  const candidates: unknown[] = [
+    data?.caption,
+    data?.description,
+    data?.title,
+    data?.meta?.caption,
+    data?.meta?.description,
+    data?.meta?.title,
+    data?.metadata?.caption,
+    data?.metadata?.description,
+    data?.metadata?.title,
+    data?.post?.caption,
+    data?.post?.text,
+    data?.tweet?.full_text,
+    data?.tweet?.fullText,
+    data?.tweet?.text,
+    data?.statusText,
+  ];
+  for (const c of candidates) {
+    if (typeof c === "string") {
+      const t = cleanText(c);
+      if (t) return t;
+    }
+  }
+  return null;
+}
+
+function buildCobaltCaption(sourceUrl: string, captionText: string | null) {
+  const linkPart = `🔗 <a href="${escapeAttr(sourceUrl)}">منبع</a>`;
+  if (!captionText) {
+    const out = `✅ دانلود شد\n${linkPart}`;
+    return truncate(out, MAX_MEDIA_CAPTION_LEN);
+  }
+  let cap = escapeHtml(cleanText(captionText));
+  let out = `✅ دانلود شد\n\n📝 ${cap}\n\n${linkPart}`;
+  if (out.length > MAX_MEDIA_CAPTION_LEN) {
+    const overflow = out.length - MAX_MEDIA_CAPTION_LEN;
+    const newLen = Math.max(0, cap.length - overflow - 1);
+    cap = cap.slice(0, newLen) + "…";
+    out = `✅ دانلود شد\n\n📝 ${cap}\n\n${linkPart}`;
+  }
+  return out;
+}
+
+async function processCobaltResponse(tg: Telegram, chatId: number, data: any, sourceUrl: string, replyTo?: number) {
   if (data?.status === "error") throw new Error(data.text || "Cobalt Error");
+
+  const overallCaptionRaw = extractCobaltCaption(data);
+  const overallCaption = buildCobaltCaption(sourceUrl, overallCaptionRaw);
+
   if (data?.status === "stream" || data?.status === "redirect") {
-    await tg.sendVideo(chatId, data.url, "✅ دانلود شد", replyTo);
+    await tg.sendVideo(chatId, data.url, overallCaption, replyTo);
     return;
   }
+
   if (data?.status === "picker" && Array.isArray(data.picker) && data.picker.length > 0) {
     const items = data.picker.slice(0, 4);
-    for (const item of items) {
-      if (item?.type === "video") await tg.sendVideo(chatId, item.url, "", replyTo);
-      else if (item?.type === "photo") await tg.sendPhoto(chatId, item.url, "", replyTo);
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      const itemCapRaw =
+        (typeof item?.caption === "string" && cleanText(item.caption)) ||
+        (typeof item?.description === "string" && cleanText(item.description)) ||
+        (typeof item?.title === "string" && cleanText(item.title)) ||
+        null;
+      const cap = i === 0 ? buildCobaltCaption(sourceUrl, itemCapRaw ?? overallCaptionRaw) : "";
+      if (item?.type === "video") await tg.sendVideo(chatId, item.url, cap, replyTo);
+      else if (item?.type === "photo") await tg.sendPhoto(chatId, item.url, cap, replyTo);
     }
     return;
   }
+
   throw new Error("Unknown response");
 }
 
 async function handleCobalt(tg: Telegram, chatId: number, targetUrl: string, replyTo?: number) {
   await tg.sendChatAction(chatId, "upload_video");
+
   const endpointsForBase = (baseUrl: string) => {
     const base = baseUrl.replace(/\/+$/, "");
     return [base, `${base}/api/json`];
   };
+
   for (const baseUrl of COBALT_INSTANCES) {
     const endpoints = endpointsForBase(baseUrl);
     for (const endpoint of endpoints) {
@@ -998,13 +1136,14 @@ async function handleCobalt(tg: Telegram, chatId: number, targetUrl: string, rep
         });
         if (!apiRes.ok) throw new Error(`HTTP ${apiRes.status}`);
         const data = await apiRes.json<any>();
-        await processCobaltResponse(tg, chatId, data, replyTo);
+        await processCobaltResponse(tg, chatId, data, targetUrl, replyTo);
         return true;
       } catch (e: any) {
         console.error(`Error on instance ${baseUrl} endpoint ${endpoint}:`, e?.message ?? String(e));
       }
     }
   }
+
   await tg.sendMessage(chatId, `❌ سرورهای دانلود پاسخگو نیستند. لطفاً دقایقی دیگر تلاش کنید.`, { replyTo });
   return true;
 }
@@ -1012,6 +1151,7 @@ async function handleCobalt(tg: Telegram, chatId: number, targetUrl: string, rep
 async function handleCallback(update: any, env: Env, ctx: ExecutionContext, tg: Telegram) {
   const cb = update?.callback_query;
   if (!cb) return;
+
   const data: string = cb.data || "";
   const chatId: number | undefined = cb.message?.chat?.id;
   const messageId: number | undefined = cb.message?.message_id;
@@ -1026,10 +1166,12 @@ async function handleCallback(update: any, env: Env, ctx: ExecutionContext, tg: 
     await tg.editMessageText(chatId, messageId, getHelpMessage(), HELP_KEYBOARD);
     return;
   }
+
   if (data === "start_menu") {
     await tg.editMessageText(chatId, messageId, "👋 سلام! به ربات خوش آمدید.\nچه کاری می‌توانم برایتان انجام دهم؟", START_KEYBOARD);
     return;
   }
+
   if (data === "noop") return;
 
   if (data.startsWith("cat:")) {
@@ -1079,10 +1221,12 @@ async function handleCallback(update: any, env: Env, ctx: ExecutionContext, tg: 
 async function handleMessage(update: any, env: Env, ctx: ExecutionContext, tg: Telegram) {
   const msg = update?.message;
   if (!msg) return;
+
   const chatId: number | undefined = msg?.chat?.id;
   const text: string | undefined = msg?.text;
   const messageId: number | undefined = msg?.message_id;
   const userId: number | undefined = msg?.from?.id;
+
   if (!chatId || !text || !userId) return;
 
   const msgDate = msg.date;
@@ -1094,11 +1238,13 @@ async function handleMessage(update: any, env: Env, ctx: ExecutionContext, tg: T
 
   const now = Date.now();
   pruneCooldownMem(now);
+
   const memExp = cooldownMem.get(userId);
   if (memExp && memExp > now) return;
 
   const cooldownKey = `cooldown:${userId}`;
   const inCooldown = await env.BOT_KV.get(cooldownKey);
+
   if (inCooldown) {
     cooldownMem.set(userId, now + COOLDOWN_TTL_MS);
     return;
@@ -1149,10 +1295,13 @@ async function handleMessage(update: any, env: Env, ctx: ExecutionContext, tg: T
 
   const parsed = getParsedIntent(userId, textNorm, stored.rates);
   if (!parsed.code) return;
+
   const code = parsed.code;
   const amount = parsed.amount;
+
   const r = stored.rates[code];
   if (!r) return;
+
   const out = r.kind === "gold" ? replyGold(r, amount, stored) : replyCurrency(code, r, amount, stored, parsed.hasAmount);
   await tg.sendMessage(chatId, out, { replyTo });
 }
@@ -1164,6 +1313,7 @@ export default {
 
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
+
     if (url.pathname === "/health") return new Response("ok");
 
     if (url.pathname === "/refresh") {
