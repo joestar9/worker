@@ -204,30 +204,53 @@ const ALIAS_INDEX: Array<{ code: string; spaced: string[]; compact: string[]; ma
   return mapped;
 })();
 
-function normalizeDigits(input: string) {
-  const map: Record<string, string> = {
-    "۰": "0",
-    "۱": "1",
-    "۲": "2",
-    "۳": "3",
-    "۴": "4",
-    "۵": "5",
-    "۶": "6",
-    "۷": "7",
-    "۸": "8",
-    "۹": "9",
-    "٠": "0",
-    "١": "1",
-    "٢": "2",
-    "٣": "3",
-    "٤": "4",
-    "٥": "5",
-    "٦": "6",
-    "٧": "7",
-    "٨": "8",
-    "٩": "9",
-  };
-  return input.split("").map((ch) => map[ch] ?? ch).join("");
+const DIGIT_MAP: Record<string, string> = {
+  "۰": "0",
+  "۱": "1",
+  "۲": "2",
+  "۳": "3",
+  "۴": "4",
+  "۵": "5",
+  "۶": "6",
+  "۷": "7",
+  "۸": "8",
+  "۹": "9",
+  "٠": "0",
+  "١": "1",
+  "٢": "2",
+  "٣": "3",
+  "٤": "4",
+  "٥": "5",
+  "٦": "6",
+  "٧": "7",
+  "٨": "8",
+  "٩": "9",
+};
+
+const DIGIT_RE = /[۰-۹٠-٩]/g;
+const ZWNJ_RE = /\u200c/g;
+const ARABIC_YE_RE = /ي/g;
+const ARABIC_KE_RE = /ك/g;
+const PUNCT_RE = /[.,!?؟؛:()[\]{}"'«»]/g;
+const WS_RE = /\s+/g;
+
+const TOMAN_FORMATTER = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
+const USD_FORMATTER = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
+
+// Persian number dictionaries are hoisted to avoid re-allocation on every message
+const PN_ONES: Record<string, number> = { "یک": 1, "یه": 1, "دو": 2, "سه": 3, "چهار": 4, "پنج": 5, "شش": 6, "شیش": 6, "هفت": 7, "هشت": 8, "نه": 9 };
+const PN_TEENS: Record<string, number> = { "ده": 10, "یازده": 11, "دوازده": 12, "سیزده": 13, "چهارده": 14, "پانزده": 15, "پونزده": 15, "شانزده": 16, "هفده": 17, "هجده": 18, "نوزده": 19 };
+const PN_TENS: Record<string, number> = { "بیست": 20, "سی": 30, "چهل": 40, "پنجاه": 50, "شصت": 60, "هفتاد": 70, "هشتاد": 80, "نود": 90 };
+const PN_HUNDREDS: Record<string, number> = { "صد": 100, "یکصد": 100, "دویست": 200, "سیصد": 300, "چهارصد": 400, "پانصد": 500, "ششصد": 600, "شیشصد": 600, "هفتصد": 700, "هشتصد": 800, "نهصد": 900 };
+const PN_SCALES: Record<string, number> = { "هزار": 1e3, "میلیون": 1e6, "ملیون": 1e6, "میلیارد": 1e9, "بیلیون": 1e9, "تریلیون": 1e12 };
+
+function norm(input: string) {
+  return normalizeDigits(input)
+    .replace(ZWNJ_RE, " ")
+    .replace(ARABIC_YE_RE, "ی")
+    .replace(ARABIC_KE_RE, "ک")
+    .toLowerCase()
+    .trim();
 }
 
 function norm(input: string) {
@@ -240,17 +263,16 @@ function norm(input: string) {
 }
 
 function stripPunct(input: string) {
-  return input.replace(/[.,!?؟؛:()[\]{}"'«»]/g, " ").replace(/\s+/g, " ").trim();
+  return input.replace(PUNCT_RE, " ").replace(WS_RE, " ").trim();
 }
 
 function formatToman(n: number) {
-  const x = Math.round(n);
-  return x.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return TOMAN_FORMATTER.format(Math.round(n));
 }
 
 function formatUSD(n: number) {
   if (n < 1) return n.toFixed(4);
-  return n.toLocaleString("en-US", { maximumFractionDigits: 2 });
+  return USD_FORMATTER.format(n);
 }
 
 function escapeHtml(s: string) {
@@ -303,38 +325,39 @@ function containsBounded(haystack: string, needle: string) {
 }
 
 function parsePersianNumber(tokens: string[]): number | null {
-  const ones: Record<string, number> = { "یک": 1, "یه": 1, "دو": 2, "سه": 3, "چهار": 4, "پنج": 5, "شش": 6, "شیش": 6, "هفت": 7, "هشت": 8, "نه": 9 };
-  const teens: Record<string, number> = { "ده": 10, "یازده": 11, "دوازده": 12, "سیزده": 13, "چهارده": 14, "پانزده": 15, "شانزده": 16, "هفده": 17, "هجده": 18, "نوزده": 19 };
-  const tens: Record<string, number> = { "بیست": 20, "سی": 30, "چهل": 40, "پنجاه": 50, "شصت": 60, "هفتاد": 70, "هشتاد": 80, "نود": 90 };
-  const hundreds: Record<string, number> = { "صد": 100, "یکصد": 100, "دویست": 200, "سیصد": 300, "چهارصد": 400, "پانصد": 500, "ششصد": 600, "شیشصد": 600, "هفتصد": 700, "هشتصد": 800, "نهصد": 900 };
-  const scales: Record<string, number> = { "هزار": 1e3, "میلیون": 1e6, "ملیون": 1e6, "میلیارد": 1e9, "بیلیون": 1e9, "تریلیون": 1e12 };
-
-  const t = tokens.map((x) => x.trim()).filter((x) => x && x !== "و");
-  if (t.length === 0) return null;
-
   let total = 0;
   let current = 0;
+  let hasAny = false;
 
   const addSmall = (w: string) => {
-    if (hundreds[w] != null) { current += hundreds[w]; return true; }
-    if (teens[w] != null) { current += teens[w]; return true; }
-    if (tens[w] != null) { current += tens[w]; return true; }
-    if (ones[w] != null) { current += ones[w]; return true; }
-    if (w === "صد") { current = (current || 1) * 100; return true; }
+    const h = PN_HUNDREDS[w];
+    if (h != null) { current += h; return true; }
+    const teen = PN_TEENS[w];
+    if (teen != null) { current += teen; return true; }
+    const ten = PN_TENS[w];
+    if (ten != null) { current += ten; return true; }
+    const one = PN_ONES[w];
+    if (one != null) { current += one; return true; }
     return false;
   };
 
-  for (const w of t) {
-    if (scales[w] != null) {
-      const scale = scales[w];
+  for (const raw of tokens) {
+    const w = raw.trim();
+    if (!w || w === "و") continue;
+    hasAny = true;
+
+    const scale = PN_SCALES[w];
+    if (scale != null) {
       const base = current || 1;
       total += base * scale;
       current = 0;
       continue;
     }
+
     if (!addSmall(w)) return null;
   }
 
+  if (!hasAny) return null;
   total += current;
   return total > 0 ? total : null;
 }
@@ -680,44 +703,61 @@ async function fetchAndMergeData(_env: Env): Promise<{ stored: Stored; rawHash: 
   return { stored, rawHash };
 }
 
-async function refreshRates(env: Env) {
+async async function refreshRates(env: Env) {
   const { stored, rawHash } = await fetchAndMergeData(env);
+
   const prevHash = await env.BOT_KV.get(KEY_HASH);
   const changed = prevHash !== rawHash;
+
   if (changed) {
-    await env.BOT_KV.put(KEY_HASH, rawHash);
-    await env.BOT_KV.put(KEY_RATES, JSON.stringify(stored));
+    await Promise.all([
+      env.BOT_KV.put(KEY_HASH, rawHash),
+      env.BOT_KV.put(KEY_RATES, JSON.stringify(stored)),
+    ]);
   } else {
+    // Backfill rates if the hash is present but the payload got evicted or never stored
     const prev = await env.BOT_KV.get(KEY_RATES);
     if (!prev) await env.BOT_KV.put(KEY_RATES, JSON.stringify(stored));
   }
+
   memStored = stored;
   memStoredReadAt = Date.now();
   return { ok: true, changed, count: Object.keys(stored.rates).length };
 }
 
-async function getStoredOrRefresh(env: Env, ctx: ExecutionContext): Promise<Stored> {
+async async function getStoredOrRefresh(env: Env, ctx: ExecutionContext): Promise<Stored> {
   const now = Date.now();
+
+  // Hot path: serve from memory to avoid KV + JSON.parse for bursty traffic.
   if (memStored && now - memStoredReadAt <= MEM_STORED_TTL_MS) {
     const age = now - memStored.fetchedAtMs;
     if (age > BG_REFRESH_AT_MS) ctx.waitUntil(refreshRates(env).catch(() => {}));
     return memStored;
   }
+
   const txt = await env.BOT_KV.get(KEY_RATES);
   if (txt) {
     const stored = JSON.parse(txt) as Stored;
     memStored = stored;
     memStoredReadAt = now;
+
     const age = now - stored.fetchedAtMs;
     if (age > FORCE_REFRESH_AT_MS) {
+      // Blocking refresh for very stale data
       await refreshRates(env).catch(() => {});
       if (memStored) return memStored;
     } else if (age > BG_REFRESH_AT_MS) {
       ctx.waitUntil(refreshRates(env).catch(() => {}));
     }
+
     return stored;
   }
+
+  // KV miss: fetch & populate, then serve from memory (refreshRates sets memStored).
   await refreshRates(env);
+  if (memStored) return memStored;
+
+  // Fallback (should be very rare)
   const txt2 = await env.BOT_KV.get(KEY_RATES);
   if (!txt2) throw new Error("no data");
   const stored2 = JSON.parse(txt2) as Stored;
@@ -748,38 +788,62 @@ function getDisplayBaseForFiat(r: Rate) {
 const FIAT_PRIORITY = ["usd", "eur", "aed", "try", "afn", "iqd", "gbp"];
 const CRYPTO_PRIORITY = ["btc", "eth", "ton", "usdt", "trx", "not", "doge", "sol"];
 
+const FIAT_PRIORITY_MAP = new Map<string, number>(FIAT_PRIORITY.map((c, i) => [c, i]));
+const CRYPTO_PRIORITY_MAP = new Map<string, number>(CRYPTO_PRIORITY.map((c, i) => [c, i]));
+
 function buildAll(stored: Stored) {
   const rates = stored.rates;
   const codes = Object.keys(rates);
+
   const goldItems: string[] = [];
   const currencyItems: string[] = [];
   const cryptoItems: string[] = [];
 
+  const usd = rates["usd"];
+  const usdPer1 = usd ? usd.price / Math.max(1, usd.unit || 1) : null;
+
+  const bucketOf = (code: string, r: Rate): "gold" | "currency" | "crypto" => {
+    if (r.kind === "crypto") return "crypto";
+    if (r.kind === "gold" || code.includes("coin") || code.includes("gold")) return "gold";
+    return "currency";
+  };
+  const BUCKET_ORDER: Record<"gold" | "currency" | "crypto", number> = { gold: 0, currency: 1, crypto: 2 };
+
   codes.sort((a, b) => {
-    const rA = rates[a], rB = rates[b];
-    if (rA.kind !== rB.kind) return 0;
-    if (rA.kind === "currency") {
-      const idxA = FIAT_PRIORITY.indexOf(a), idxB = FIAT_PRIORITY.indexOf(b);
-      if (idxA !== -1 && idxB !== -1) return idxA - idxB;
-      if (idxA !== -1) return -1;
-      if (idxB !== -1) return 1;
+    const rA = rates[a];
+    const rB = rates[b];
+    const bA = bucketOf(a, rA);
+    const bB = bucketOf(b, rB);
+
+    if (bA !== bB) return BUCKET_ORDER[bA] - BUCKET_ORDER[bB];
+
+    if (bA === "currency") {
+      const pA = FIAT_PRIORITY_MAP.get(a);
+      const pB = FIAT_PRIORITY_MAP.get(b);
+      if (pA != null || pB != null) return (pA ?? 1e9) - (pB ?? 1e9);
     }
-    if (rA.kind === "crypto") {
-      const idxA = CRYPTO_PRIORITY.indexOf(a), idxB = CRYPTO_PRIORITY.indexOf(b);
-      if (idxA !== -1 && idxB !== -1) return idxA - idxB;
-      if (idxA !== -1) return -1;
-      if (idxB !== -1) return 1;
+
+    if (bA === "crypto") {
+      const pA = CRYPTO_PRIORITY_MAP.get(a);
+      const pB = CRYPTO_PRIORITY_MAP.get(b);
+      if (pA != null || pB != null) return (pA ?? 1e9) - (pB ?? 1e9);
     }
+
     return a.localeCompare(b);
   });
 
   for (const c of codes) {
     const r = rates[c];
+    if (!r) continue;
+
     if (r.kind === "crypto") {
       const per1Toman = Math.round(r.price / Math.max(1, r.unit || 1));
       const priceStr = formatToman(per1Toman);
       const usdP = r.usdPrice != null ? formatUSD(r.usdPrice) : "?";
-      const changePart = typeof r.change24h === "number" ? ` | ${r.change24h >= 0 ? "🟢" : "🔴"} ${Math.abs(r.change24h).toFixed(1)}%` : "";
+      const changePart =
+        typeof r.change24h === "number"
+          ? ` | ${r.change24h >= 0 ? "🟢" : "🔴"} ${Math.abs(r.change24h).toFixed(1)}%`
+          : "";
       const line = `💎 <b>${r.fa}</b> (${c.toUpperCase()})
 └ ${priceStr} ت | ${usdP}$${changePart}`;
       cryptoItems.push(line);
@@ -789,22 +853,22 @@ function buildAll(stored: Stored) {
     const { showUnit, baseAmount, baseToman } = getDisplayBaseForFiat(r);
     const priceStr = formatToman(baseToman);
     const meta = META[c] ?? { emoji: "💱", fa: r.title || c.toUpperCase() };
-    const usd = stored.rates["usd"];
-    const usdPer1 = usd ? usd.price / Math.max(1, usd.unit || 1) : null;
+
     const usdEq = usdPer1 && c !== "usd" && r.kind === "currency" ? baseToman / usdPer1 : null;
     const unitPrefix = showUnit ? `${baseAmount} ` : "";
     const usdPart = usdEq != null ? ` (≈ $${formatUSD(usdEq)})` : "";
     const line = `${meta.emoji} <b>${unitPrefix}${meta.fa}:</b> \u200E<code>${priceStr}</code> تومان${usdPart}`;
-    if (r.kind === "gold" || c.includes("coin") || c.includes("gold")) goldItems.push(line);
+
+    if (bucketOf(c, r) === "gold") goldItems.push(line);
     else currencyItems.push(line);
   }
 
-  const lines: string[] = [];
-  if (goldItems.length > 0) lines.push("🟡 <b>نرخ طلا و سکه</b>", "➖➖➖➖➖➖", ...goldItems, "");
-  if (currencyItems.length > 0) lines.push("💵 <b>نرخ ارزهای بازار</b>", "➖➖➖➖➖➖", ...currencyItems, "");
-  if (cryptoItems.length > 0) lines.push("🚀 <b>بازار ارز دیجیتال</b>", "➖➖➖➖➖➖", ...cryptoItems);
-  lines.push("\n🕐 <b>بروزرسانی:</b> " + getUpdateTimeStr(stored));
-  return lines.join("\n");
+  const out: string[] = [];
+  if (goldItems.length > 0) out.push("🟡 <b>نرخ طلا و سکه</b>", "➖➖➖➖➖➖", ...goldItems, "");
+  if (currencyItems.length > 0) out.push("💵 <b>نرخ ارزهای بازار</b>", "➖➖➖➖➖➖", ...currencyItems, "");
+  if (cryptoItems.length > 0) out.push("🚀 <b>بازار ارز دیجیتال</b>", "➖➖➖➖➖➖", ...cryptoItems);
+  out.push("\n🕐 <b>بروزرسانی:</b> " + getUpdateTimeStr(stored));
+  return out.join("\n");
 }
 
 const PRICE_PAGE_SIZE = 8;
@@ -832,7 +896,7 @@ function clampPage(page: number, totalPages: number) {
 }
 
 function shortColText(s: string, max = 18) {
-  const t = s.replace(/\s+/g, " ").trim();
+  const t = s.replace(WS_RE, " ").trim();
   if (t.length <= max) return t;
   return t.slice(0, max - 1) + "…";
 }
@@ -844,10 +908,9 @@ function buildPriceItems(stored: Stored, category: PriceCategory): PriceListItem
   if (category === "crypto") {
     const cryptoCodes = codes.filter((c) => rates[c]?.kind === "crypto");
     cryptoCodes.sort((a, b) => {
-      const idxA = CRYPTO_PRIORITY.indexOf(a), idxB = CRYPTO_PRIORITY.indexOf(b);
-      if (idxA !== -1 && idxB !== -1) return idxA - idxB;
-      if (idxA !== -1) return -1;
-      if (idxB !== -1) return 1;
+      const pA = CRYPTO_PRIORITY_MAP.get(a);
+      const pB = CRYPTO_PRIORITY_MAP.get(b);
+      if (pA != null || pB != null) return (pA ?? 1e9) - (pB ?? 1e9);
       return a.localeCompare(b);
     });
 
@@ -874,10 +937,9 @@ function buildPriceItems(stored: Stored, category: PriceCategory): PriceListItem
 
   goldCodes.sort((a, b) => a.localeCompare(b));
   currencyCodes.sort((a, b) => {
-    const idxA = FIAT_PRIORITY.indexOf(a), idxB = FIAT_PRIORITY.indexOf(b);
-    if (idxA !== -1 && idxB !== -1) return idxA - idxB;
-    if (idxA !== -1) return -1;
-    if (idxB !== -1) return 1;
+    const pA = FIAT_PRIORITY_MAP.get(a);
+    const pB = FIAT_PRIORITY_MAP.get(b);
+    if (pA != null || pB != null) return (pA ?? 1e9) - (pB ?? 1e9);
     return a.localeCompare(b);
   });
 
@@ -890,7 +952,6 @@ function buildPriceItems(stored: Stored, category: PriceCategory): PriceListItem
     const priceStr = formatToman(baseToman);
     const meta = META[c] ?? { emoji: "💱", fa: r.title || r.fa || c.toUpperCase() };
     items.push({ code: c, category, emoji: meta.emoji, name: shortColText(showUnit ? `${baseAmount} ${meta.fa}` : meta.fa, 20), price: shortColText(`${priceStr} ت`, 16) });
-    void meta;
   }
 
   return items;
