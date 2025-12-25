@@ -41,6 +41,18 @@ const COOLDOWN_MEM_MAX = 20_000;
 
 const MAX_MEDIA_CAPTION_LEN = 950;
 
+const COBALT_TIMEOUT_MS = 12_000;
+const COBALT_TIMEOUT_MS_TW = 14_000;
+const COBALT_BACKOFF_BASE_MS = 220;
+const COBALT_BACKOFF_BASE_MS_TW = 320;
+const COBALT_BACKOFF_MAX_MS = 2400;
+const COBALT_COOLDOWN_429_MS = 20 * 60_000;
+const COBALT_COOLDOWN_403_MS = 25 * 60_000;
+const COBALT_COOLDOWN_5XX_MS = 5 * 60_000;
+const COBALT_COOLDOWN_TIMEOUT_MS = 6 * 60_000;
+const COBALT_COOLDOWN_OTHER_MS = 3 * 60_000;
+const COBALT_STATE_TTL_MS = 2 * 60 * 60_000;
+
 const TG_JSON_HEADERS = { "content-type": "application/json" } as const;
 const UA_HEADERS = { "User-Agent": "Mozilla/5.0" } as const;
 
@@ -72,6 +84,9 @@ let memStored: Stored | null = null;
 let memStoredReadAt = 0;
 
 const cooldownMem = new Map<number, number>();
+
+type CobaltState = { failCount: number; cooldownUntil: number; lastOkAt: number; lastSeenAt: number };
+const cobaltState = new Map<string, CobaltState>();
 
 const META: Record<string, { emoji: string; fa: string }> = {
   usd: { emoji: "🇺🇸", fa: "دلار آمریکا" },
@@ -564,17 +579,14 @@ const NAME_TO_CODE: Record<string, { code: string; kind: Rate["kind"]; fa: strin
   "bahraini dinar": { code: "bhd", kind: "currency", fa: "دینار بحرین", emoji: "🇧🇭" },
   "omani rial": { code: "omr", kind: "currency", fa: "ریال عمان", emoji: "🇴🇲" },
   "qatari riyal": { code: "qar", kind: "currency", fa: "ریال قطر", emoji: "🇶🇦" },
-
   "gold gram 18k": { code: "gold_gram_18k", kind: "gold", fa: "گرم طلای ۱۸", emoji: "💰" },
   "gold mithqal": { code: "gold_mithqal", kind: "gold", fa: "مثقال طلا", emoji: "💰" },
   "gold ounce": { code: "gold_ounce", kind: "gold", fa: "اونس طلا", emoji: "💰" },
-
   "azadi": { code: "coin_azadi", kind: "gold", fa: "سکه آزادی", emoji: "🪙" },
   "emami": { code: "coin_emami", kind: "gold", fa: "سکه امامی", emoji: "🪙" },
   "½azadi": { code: "coin_half_azadi", kind: "gold", fa: "نیم سکه", emoji: "🪙" },
   "¼azadi": { code: "coin_quarter_azadi", kind: "gold", fa: "ربع سکه", emoji: "🪙" },
   "gerami": { code: "coin_gerami", kind: "gold", fa: "سکه گرمی", emoji: "🪙" },
-
   "bitcoin": { code: "btc", kind: "crypto", fa: "بیت‌کوین", emoji: "💎" },
   "ethereum": { code: "eth", kind: "crypto", fa: "اتریوم", emoji: "💎" },
   "tether usdt": { code: "usdt", kind: "crypto", fa: "تتر", emoji: "💎" },
@@ -878,6 +890,7 @@ function buildPriceItems(stored: Stored, category: PriceCategory): PriceListItem
     const priceStr = formatToman(baseToman);
     const meta = META[c] ?? { emoji: "💱", fa: r.title || r.fa || c.toUpperCase() };
     items.push({ code: c, category, emoji: meta.emoji, name: shortColText(showUnit ? `${baseAmount} ${meta.fa}` : meta.fa, 20), price: shortColText(`${priceStr} ت`, 16) });
+    void meta;
   }
 
   return items;
@@ -1066,6 +1079,16 @@ function pickCobaltUrl(text: string): string | null {
   }
 }
 
+function isTwitterTarget(urlStr: string) {
+  try {
+    const u = new URL(urlStr);
+    const h = u.hostname.toLowerCase();
+    return h === "twitter.com" || h.endsWith(".twitter.com") || h === "x.com" || h.endsWith(".x.com") || h === "t.co" || h === "fxtwitter.com" || h === "vxtwitter.com" || h === "fixupx.com";
+  } catch {
+    return false;
+  }
+}
+
 function extractCobaltCaption(data: any): string | null {
   const candidates: unknown[] = [
     data?.caption,
@@ -1131,29 +1154,146 @@ async function processCobaltResponse(tg: Telegram, chatId: number, data: any, so
   throw new Error("Unknown response");
 }
 
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+function pruneCobaltState(now: number) {
+  for (const [k, v] of cobaltState) {
+    if (now - v.lastSeenAt > COBALT_STATE_TTL_MS) cobaltState.delete(k);
+  }
+}
+
+function getCobaltState(key: string, now: number): CobaltState {
+  const prev = cobaltState.get(key);
+  if (prev) {
+    prev.lastSeenAt = now;
+    return prev;
+  }
+  const s: CobaltState = { failCount: 0, cooldownUntil: 0, lastOkAt: 0, lastSeenAt: now };
+  cobaltState.set(key, s);
+  return s;
+}
+
+function markCobaltOk(baseUrl: string, now: number) {
+  const s = getCobaltState(baseUrl, now);
+  s.failCount = 0;
+  s.cooldownUntil = 0;
+  s.lastOkAt = now;
+}
+
+function markCobaltFail(baseUrl: string, now: number, info: { status?: number; timeout?: boolean }) {
+  const s = getCobaltState(baseUrl, now);
+  s.failCount = Math.min(50, (s.failCount || 0) + 1);
+  const st = info.status ?? 0;
+  let cd = COBALT_COOLDOWN_OTHER_MS;
+  if (info.timeout) cd = COBALT_COOLDOWN_TIMEOUT_MS;
+  else if (st === 429) cd = COBALT_COOLDOWN_429_MS;
+  else if (st === 403) cd = COBALT_COOLDOWN_403_MS;
+  else if (st >= 500) cd = COBALT_COOLDOWN_5XX_MS;
+  else if (st === 0) cd = COBALT_COOLDOWN_TIMEOUT_MS;
+  s.cooldownUntil = Math.max(s.cooldownUntil || 0, now + cd);
+}
+
+function sortCobaltBases(bases: string[], now: number) {
+  const scored = bases.map((b) => {
+    const s = cobaltState.get(b);
+    const fail = s?.failCount ?? 0;
+    const cool = s?.cooldownUntil ?? 0;
+    const okAt = s?.lastOkAt ?? 0;
+    const inCool = cool > now;
+    const score = (inCool ? 10_000 : 0) + fail * 50 - okAt / 1e12;
+    return { b, score, inCool };
+  });
+  scored.sort((x, y) => x.score - y.score);
+  const available = scored.filter((x) => !x.inCool).map((x) => x.b);
+  const cooled = scored.filter((x) => x.inCool).map((x) => x.b);
+  return [...available, ...cooled];
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number) {
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...init, signal: ac.signal });
+    clearTimeout(t);
+    return { res, timeout: false as const };
+  } catch (e) {
+    clearTimeout(t);
+    const msg = String((e as any)?.name ?? "") + ":" + String((e as any)?.message ?? e);
+    const isTimeout = msg.toLowerCase().includes("abort") || msg.toLowerCase().includes("timeout");
+    return { res: null as Response | null, timeout: isTimeout as const };
+  }
+}
+
 async function handleCobalt(tg: Telegram, chatId: number, targetUrl: string, replyTo?: number) {
   await tg.sendChatAction(chatId, "upload_video");
+
+  const now = Date.now();
+  pruneCobaltState(now);
+
+  const isTw = isTwitterTarget(targetUrl);
+  const timeoutMs = isTw ? COBALT_TIMEOUT_MS_TW : COBALT_TIMEOUT_MS;
+  const baseDelay = isTw ? COBALT_BACKOFF_BASE_MS_TW : COBALT_BACKOFF_BASE_MS;
+
+  const bases = sortCobaltBases([...COBALT_INSTANCES], now);
 
   const endpointsForBase = (baseUrl: string) => {
     const base = baseUrl.replace(/\/+$/, "");
     return [base, `${base}/api/json`];
   };
 
-  for (const baseUrl of COBALT_INSTANCES) {
+  let attempt = 0;
+
+  for (const baseUrl of bases) {
+    const s = getCobaltState(baseUrl, Date.now());
     const endpoints = endpointsForBase(baseUrl);
+
     for (const endpoint of endpoints) {
+      const now2 = Date.now();
+      if (attempt > 0) {
+        const jitter = Math.floor(Math.random() * 180);
+        const step = Math.min(COBALT_BACKOFF_MAX_MS, baseDelay * attempt);
+        const extra = Math.min(800, (s.failCount || 0) * 20);
+        await sleep(step + jitter + extra);
+      }
+      attempt++;
+
+      const body = JSON.stringify({ url: targetUrl, vCodec: "h264" });
+
+      const { res, timeout } = await fetchWithTimeout(
+        endpoint,
+        { method: "POST", headers: COBALT_HEADERS, body },
+        timeoutMs,
+      );
+
+      if (!res) {
+        markCobaltFail(baseUrl, Date.now(), { timeout: true });
+        continue;
+      }
+
+      if (!res.ok) {
+        markCobaltFail(baseUrl, Date.now(), { status: res.status });
+        continue;
+      }
+
+      let data: any = null;
       try {
-        const apiRes = await fetch(endpoint, {
-          method: "POST",
-          headers: COBALT_HEADERS,
-          body: JSON.stringify({ url: targetUrl, vCodec: "h264" }),
-        });
-        if (!apiRes.ok) throw new Error(`HTTP ${apiRes.status}`);
-        const data = await apiRes.json<any>();
+        data = await res.json<any>();
+      } catch {
+        markCobaltFail(baseUrl, Date.now(), { status: 0 });
+        continue;
+      }
+
+      try {
         await processCobaltResponse(tg, chatId, data, targetUrl, replyTo);
+        markCobaltOk(baseUrl, Date.now());
         return true;
       } catch (e: any) {
-        console.error(`Error on instance ${baseUrl} endpoint ${endpoint}:`, e?.message ?? String(e));
+        const st = typeof (data as any)?.statusCode === "number" ? (data as any).statusCode : undefined;
+        markCobaltFail(baseUrl, Date.now(), { status: st ?? 0, timeout: false });
+        void e;
+        continue;
       }
     }
   }
