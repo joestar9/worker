@@ -204,53 +204,30 @@ const ALIAS_INDEX: Array<{ code: string; spaced: string[]; compact: string[]; ma
   return mapped;
 })();
 
-const DIGIT_MAP: Record<string, string> = {
-  "۰": "0",
-  "۱": "1",
-  "۲": "2",
-  "۳": "3",
-  "۴": "4",
-  "۵": "5",
-  "۶": "6",
-  "۷": "7",
-  "۸": "8",
-  "۹": "9",
-  "٠": "0",
-  "١": "1",
-  "٢": "2",
-  "٣": "3",
-  "٤": "4",
-  "٥": "5",
-  "٦": "6",
-  "٧": "7",
-  "٨": "8",
-  "٩": "9",
-};
-
-const DIGIT_RE = /[۰-۹٠-٩]/g;
-const ZWNJ_RE = /\u200c/g;
-const ARABIC_YE_RE = /ي/g;
-const ARABIC_KE_RE = /ك/g;
-const PUNCT_RE = /[.,!?؟؛:()[\]{}"'«»]/g;
-const WS_RE = /\s+/g;
-
-const TOMAN_FORMATTER = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
-const USD_FORMATTER = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
-
-// Persian number dictionaries are hoisted to avoid re-allocation on every message
-const PN_ONES: Record<string, number> = { "یک": 1, "یه": 1, "دو": 2, "سه": 3, "چهار": 4, "پنج": 5, "شش": 6, "شیش": 6, "هفت": 7, "هشت": 8, "نه": 9 };
-const PN_TEENS: Record<string, number> = { "ده": 10, "یازده": 11, "دوازده": 12, "سیزده": 13, "چهارده": 14, "پانزده": 15, "پونزده": 15, "شانزده": 16, "هفده": 17, "هجده": 18, "نوزده": 19 };
-const PN_TENS: Record<string, number> = { "بیست": 20, "سی": 30, "چهل": 40, "پنجاه": 50, "شصت": 60, "هفتاد": 70, "هشتاد": 80, "نود": 90 };
-const PN_HUNDREDS: Record<string, number> = { "صد": 100, "یکصد": 100, "دویست": 200, "سیصد": 300, "چهارصد": 400, "پانصد": 500, "ششصد": 600, "شیشصد": 600, "هفتصد": 700, "هشتصد": 800, "نهصد": 900 };
-const PN_SCALES: Record<string, number> = { "هزار": 1e3, "میلیون": 1e6, "ملیون": 1e6, "میلیارد": 1e9, "بیلیون": 1e9, "تریلیون": 1e12 };
-
-function norm(input: string) {
-  return normalizeDigits(input)
-    .replace(ZWNJ_RE, " ")
-    .replace(ARABIC_YE_RE, "ی")
-    .replace(ARABIC_KE_RE, "ک")
-    .toLowerCase()
-    .trim();
+function normalizeDigits(input: string) {
+  const map: Record<string, string> = {
+    "۰": "0",
+    "۱": "1",
+    "۲": "2",
+    "۳": "3",
+    "۴": "4",
+    "۵": "5",
+    "۶": "6",
+    "۷": "7",
+    "۸": "8",
+    "۹": "9",
+    "٠": "0",
+    "١": "1",
+    "٢": "2",
+    "٣": "3",
+    "٤": "4",
+    "٥": "5",
+    "٦": "6",
+    "٧": "7",
+    "٨": "8",
+    "٩": "9",
+  };
+  return input.split("").map((ch) => map[ch] ?? ch).join("");
 }
 
 function norm(input: string) {
@@ -263,16 +240,17 @@ function norm(input: string) {
 }
 
 function stripPunct(input: string) {
-  return input.replace(PUNCT_RE, " ").replace(WS_RE, " ").trim();
+  return input.replace(/[.,!?؟؛:()[\]{}"'«»]/g, " ").replace(/\s+/g, " ").trim();
 }
 
 function formatToman(n: number) {
-  return TOMAN_FORMATTER.format(Math.round(n));
+  const x = Math.round(n);
+  return x.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 }
 
 function formatUSD(n: number) {
   if (n < 1) return n.toFixed(4);
-  return USD_FORMATTER.format(n);
+  return n.toLocaleString("en-US", { maximumFractionDigits: 2 });
 }
 
 function escapeHtml(s: string) {
@@ -325,39 +303,38 @@ function containsBounded(haystack: string, needle: string) {
 }
 
 function parsePersianNumber(tokens: string[]): number | null {
+  const ones: Record<string, number> = { "یک": 1, "یه": 1, "دو": 2, "سه": 3, "چهار": 4, "پنج": 5, "شش": 6, "شیش": 6, "هفت": 7, "هشت": 8, "نه": 9 };
+  const teens: Record<string, number> = { "ده": 10, "یازده": 11, "دوازده": 12, "سیزده": 13, "چهارده": 14, "پانزده": 15, "شانزده": 16, "هفده": 17, "هجده": 18, "نوزده": 19 };
+  const tens: Record<string, number> = { "بیست": 20, "سی": 30, "چهل": 40, "پنجاه": 50, "شصت": 60, "هفتاد": 70, "هشتاد": 80, "نود": 90 };
+  const hundreds: Record<string, number> = { "صد": 100, "یکصد": 100, "دویست": 200, "سیصد": 300, "چهارصد": 400, "پانصد": 500, "ششصد": 600, "شیشصد": 600, "هفتصد": 700, "هشتصد": 800, "نهصد": 900 };
+  const scales: Record<string, number> = { "هزار": 1e3, "میلیون": 1e6, "ملیون": 1e6, "میلیارد": 1e9, "بیلیون": 1e9, "تریلیون": 1e12 };
+
+  const t = tokens.map((x) => x.trim()).filter((x) => x && x !== "و");
+  if (t.length === 0) return null;
+
   let total = 0;
   let current = 0;
-  let hasAny = false;
 
   const addSmall = (w: string) => {
-    const h = PN_HUNDREDS[w];
-    if (h != null) { current += h; return true; }
-    const teen = PN_TEENS[w];
-    if (teen != null) { current += teen; return true; }
-    const ten = PN_TENS[w];
-    if (ten != null) { current += ten; return true; }
-    const one = PN_ONES[w];
-    if (one != null) { current += one; return true; }
+    if (hundreds[w] != null) { current += hundreds[w]; return true; }
+    if (teens[w] != null) { current += teens[w]; return true; }
+    if (tens[w] != null) { current += tens[w]; return true; }
+    if (ones[w] != null) { current += ones[w]; return true; }
+    if (w === "صد") { current = (current || 1) * 100; return true; }
     return false;
   };
 
-  for (const raw of tokens) {
-    const w = raw.trim();
-    if (!w || w === "و") continue;
-    hasAny = true;
-
-    const scale = PN_SCALES[w];
-    if (scale != null) {
+  for (const w of t) {
+    if (scales[w] != null) {
+      const scale = scales[w];
       const base = current || 1;
       total += base * scale;
       current = 0;
       continue;
     }
-
     if (!addSmall(w)) return null;
   }
 
-  if (!hasAny) return null;
   total += current;
   return total > 0 ? total : null;
 }
@@ -549,6 +526,31 @@ class Telegram {
     }
     return this.call("sendPhoto", body, false);
   }
+
+  sendAnimation(chatId: number, animationUrl: string, caption: string, replyTo?: number) {
+    const body: any = { chat_id: chatId, animation: animationUrl, caption, parse_mode: "HTML" };
+    if (replyTo) {
+      body.reply_to_message_id = replyTo;
+      body.allow_sending_without_reply = true;
+    }
+    return this.call("sendAnimation", body, true);
+  }
+  sendDocument(chatId: number, documentUrl: string, caption: string, replyTo?: number) {
+    const body: any = { chat_id: chatId, document: documentUrl, caption, parse_mode: "HTML" };
+    if (replyTo) {
+      body.reply_to_message_id = replyTo;
+      body.allow_sending_without_reply = true;
+    }
+    return this.call("sendDocument", body, true);
+  }
+  sendAudio(chatId: number, audioUrl: string, caption: string, replyTo?: number) {
+    const body: any = { chat_id: chatId, audio: audioUrl, caption, parse_mode: "HTML" };
+    if (replyTo) {
+      body.reply_to_message_id = replyTo;
+      body.allow_sending_without_reply = true;
+    }
+    return this.call("sendAudio", body, true);
+  }
 }
 
 function extractUnitFromName(name: string) {
@@ -703,61 +705,44 @@ async function fetchAndMergeData(_env: Env): Promise<{ stored: Stored; rawHash: 
   return { stored, rawHash };
 }
 
-async async function refreshRates(env: Env) {
+async function refreshRates(env: Env) {
   const { stored, rawHash } = await fetchAndMergeData(env);
-
   const prevHash = await env.BOT_KV.get(KEY_HASH);
   const changed = prevHash !== rawHash;
-
   if (changed) {
-    await Promise.all([
-      env.BOT_KV.put(KEY_HASH, rawHash),
-      env.BOT_KV.put(KEY_RATES, JSON.stringify(stored)),
-    ]);
+    await env.BOT_KV.put(KEY_HASH, rawHash);
+    await env.BOT_KV.put(KEY_RATES, JSON.stringify(stored));
   } else {
-    // Backfill rates if the hash is present but the payload got evicted or never stored
     const prev = await env.BOT_KV.get(KEY_RATES);
     if (!prev) await env.BOT_KV.put(KEY_RATES, JSON.stringify(stored));
   }
-
   memStored = stored;
   memStoredReadAt = Date.now();
   return { ok: true, changed, count: Object.keys(stored.rates).length };
 }
 
-async async function getStoredOrRefresh(env: Env, ctx: ExecutionContext): Promise<Stored> {
+async function getStoredOrRefresh(env: Env, ctx: ExecutionContext): Promise<Stored> {
   const now = Date.now();
-
-  // Hot path: serve from memory to avoid KV + JSON.parse for bursty traffic.
   if (memStored && now - memStoredReadAt <= MEM_STORED_TTL_MS) {
     const age = now - memStored.fetchedAtMs;
     if (age > BG_REFRESH_AT_MS) ctx.waitUntil(refreshRates(env).catch(() => {}));
     return memStored;
   }
-
   const txt = await env.BOT_KV.get(KEY_RATES);
   if (txt) {
     const stored = JSON.parse(txt) as Stored;
     memStored = stored;
     memStoredReadAt = now;
-
     const age = now - stored.fetchedAtMs;
     if (age > FORCE_REFRESH_AT_MS) {
-      // Blocking refresh for very stale data
       await refreshRates(env).catch(() => {});
       if (memStored) return memStored;
     } else if (age > BG_REFRESH_AT_MS) {
       ctx.waitUntil(refreshRates(env).catch(() => {}));
     }
-
     return stored;
   }
-
-  // KV miss: fetch & populate, then serve from memory (refreshRates sets memStored).
   await refreshRates(env);
-  if (memStored) return memStored;
-
-  // Fallback (should be very rare)
   const txt2 = await env.BOT_KV.get(KEY_RATES);
   if (!txt2) throw new Error("no data");
   const stored2 = JSON.parse(txt2) as Stored;
@@ -788,62 +773,38 @@ function getDisplayBaseForFiat(r: Rate) {
 const FIAT_PRIORITY = ["usd", "eur", "aed", "try", "afn", "iqd", "gbp"];
 const CRYPTO_PRIORITY = ["btc", "eth", "ton", "usdt", "trx", "not", "doge", "sol"];
 
-const FIAT_PRIORITY_MAP = new Map<string, number>(FIAT_PRIORITY.map((c, i) => [c, i]));
-const CRYPTO_PRIORITY_MAP = new Map<string, number>(CRYPTO_PRIORITY.map((c, i) => [c, i]));
-
 function buildAll(stored: Stored) {
   const rates = stored.rates;
   const codes = Object.keys(rates);
-
   const goldItems: string[] = [];
   const currencyItems: string[] = [];
   const cryptoItems: string[] = [];
 
-  const usd = rates["usd"];
-  const usdPer1 = usd ? usd.price / Math.max(1, usd.unit || 1) : null;
-
-  const bucketOf = (code: string, r: Rate): "gold" | "currency" | "crypto" => {
-    if (r.kind === "crypto") return "crypto";
-    if (r.kind === "gold" || code.includes("coin") || code.includes("gold")) return "gold";
-    return "currency";
-  };
-  const BUCKET_ORDER: Record<"gold" | "currency" | "crypto", number> = { gold: 0, currency: 1, crypto: 2 };
-
   codes.sort((a, b) => {
-    const rA = rates[a];
-    const rB = rates[b];
-    const bA = bucketOf(a, rA);
-    const bB = bucketOf(b, rB);
-
-    if (bA !== bB) return BUCKET_ORDER[bA] - BUCKET_ORDER[bB];
-
-    if (bA === "currency") {
-      const pA = FIAT_PRIORITY_MAP.get(a);
-      const pB = FIAT_PRIORITY_MAP.get(b);
-      if (pA != null || pB != null) return (pA ?? 1e9) - (pB ?? 1e9);
+    const rA = rates[a], rB = rates[b];
+    if (rA.kind !== rB.kind) return 0;
+    if (rA.kind === "currency") {
+      const idxA = FIAT_PRIORITY.indexOf(a), idxB = FIAT_PRIORITY.indexOf(b);
+      if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+      if (idxA !== -1) return -1;
+      if (idxB !== -1) return 1;
     }
-
-    if (bA === "crypto") {
-      const pA = CRYPTO_PRIORITY_MAP.get(a);
-      const pB = CRYPTO_PRIORITY_MAP.get(b);
-      if (pA != null || pB != null) return (pA ?? 1e9) - (pB ?? 1e9);
+    if (rA.kind === "crypto") {
+      const idxA = CRYPTO_PRIORITY.indexOf(a), idxB = CRYPTO_PRIORITY.indexOf(b);
+      if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+      if (idxA !== -1) return -1;
+      if (idxB !== -1) return 1;
     }
-
     return a.localeCompare(b);
   });
 
   for (const c of codes) {
     const r = rates[c];
-    if (!r) continue;
-
     if (r.kind === "crypto") {
       const per1Toman = Math.round(r.price / Math.max(1, r.unit || 1));
       const priceStr = formatToman(per1Toman);
       const usdP = r.usdPrice != null ? formatUSD(r.usdPrice) : "?";
-      const changePart =
-        typeof r.change24h === "number"
-          ? ` | ${r.change24h >= 0 ? "🟢" : "🔴"} ${Math.abs(r.change24h).toFixed(1)}%`
-          : "";
+      const changePart = typeof r.change24h === "number" ? ` | ${r.change24h >= 0 ? "🟢" : "🔴"} ${Math.abs(r.change24h).toFixed(1)}%` : "";
       const line = `💎 <b>${r.fa}</b> (${c.toUpperCase()})
 └ ${priceStr} ت | ${usdP}$${changePart}`;
       cryptoItems.push(line);
@@ -853,22 +814,22 @@ function buildAll(stored: Stored) {
     const { showUnit, baseAmount, baseToman } = getDisplayBaseForFiat(r);
     const priceStr = formatToman(baseToman);
     const meta = META[c] ?? { emoji: "💱", fa: r.title || c.toUpperCase() };
-
+    const usd = stored.rates["usd"];
+    const usdPer1 = usd ? usd.price / Math.max(1, usd.unit || 1) : null;
     const usdEq = usdPer1 && c !== "usd" && r.kind === "currency" ? baseToman / usdPer1 : null;
     const unitPrefix = showUnit ? `${baseAmount} ` : "";
     const usdPart = usdEq != null ? ` (≈ $${formatUSD(usdEq)})` : "";
     const line = `${meta.emoji} <b>${unitPrefix}${meta.fa}:</b> \u200E<code>${priceStr}</code> تومان${usdPart}`;
-
-    if (bucketOf(c, r) === "gold") goldItems.push(line);
+    if (r.kind === "gold" || c.includes("coin") || c.includes("gold")) goldItems.push(line);
     else currencyItems.push(line);
   }
 
-  const out: string[] = [];
-  if (goldItems.length > 0) out.push("🟡 <b>نرخ طلا و سکه</b>", "➖➖➖➖➖➖", ...goldItems, "");
-  if (currencyItems.length > 0) out.push("💵 <b>نرخ ارزهای بازار</b>", "➖➖➖➖➖➖", ...currencyItems, "");
-  if (cryptoItems.length > 0) out.push("🚀 <b>بازار ارز دیجیتال</b>", "➖➖➖➖➖➖", ...cryptoItems);
-  out.push("\n🕐 <b>بروزرسانی:</b> " + getUpdateTimeStr(stored));
-  return out.join("\n");
+  const lines: string[] = [];
+  if (goldItems.length > 0) lines.push("🟡 <b>نرخ طلا و سکه</b>", "➖➖➖➖➖➖", ...goldItems, "");
+  if (currencyItems.length > 0) lines.push("💵 <b>نرخ ارزهای بازار</b>", "➖➖➖➖➖➖", ...currencyItems, "");
+  if (cryptoItems.length > 0) lines.push("🚀 <b>بازار ارز دیجیتال</b>", "➖➖➖➖➖➖", ...cryptoItems);
+  lines.push("\n🕐 <b>بروزرسانی:</b> " + getUpdateTimeStr(stored));
+  return lines.join("\n");
 }
 
 const PRICE_PAGE_SIZE = 8;
@@ -896,7 +857,7 @@ function clampPage(page: number, totalPages: number) {
 }
 
 function shortColText(s: string, max = 18) {
-  const t = s.replace(WS_RE, " ").trim();
+  const t = s.replace(/\s+/g, " ").trim();
   if (t.length <= max) return t;
   return t.slice(0, max - 1) + "…";
 }
@@ -908,9 +869,10 @@ function buildPriceItems(stored: Stored, category: PriceCategory): PriceListItem
   if (category === "crypto") {
     const cryptoCodes = codes.filter((c) => rates[c]?.kind === "crypto");
     cryptoCodes.sort((a, b) => {
-      const pA = CRYPTO_PRIORITY_MAP.get(a);
-      const pB = CRYPTO_PRIORITY_MAP.get(b);
-      if (pA != null || pB != null) return (pA ?? 1e9) - (pB ?? 1e9);
+      const idxA = CRYPTO_PRIORITY.indexOf(a), idxB = CRYPTO_PRIORITY.indexOf(b);
+      if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+      if (idxA !== -1) return -1;
+      if (idxB !== -1) return 1;
       return a.localeCompare(b);
     });
 
@@ -937,9 +899,10 @@ function buildPriceItems(stored: Stored, category: PriceCategory): PriceListItem
 
   goldCodes.sort((a, b) => a.localeCompare(b));
   currencyCodes.sort((a, b) => {
-    const pA = FIAT_PRIORITY_MAP.get(a);
-    const pB = FIAT_PRIORITY_MAP.get(b);
-    if (pA != null || pB != null) return (pA ?? 1e9) - (pB ?? 1e9);
+    const idxA = FIAT_PRIORITY.indexOf(a), idxB = FIAT_PRIORITY.indexOf(b);
+    if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+    if (idxA !== -1) return -1;
+    if (idxB !== -1) return 1;
     return a.localeCompare(b);
   });
 
@@ -952,6 +915,7 @@ function buildPriceItems(stored: Stored, category: PriceCategory): PriceListItem
     const priceStr = formatToman(baseToman);
     const meta = META[c] ?? { emoji: "💱", fa: r.title || r.fa || c.toUpperCase() };
     items.push({ code: c, category, emoji: meta.emoji, name: shortColText(showUnit ? `${baseAmount} ${meta.fa}` : meta.fa, 20), price: shortColText(`${priceStr} ت`, 16) });
+    void meta;
   }
 
   return items;
@@ -1185,18 +1149,76 @@ function buildCobaltCaption(sourceUrl: string, captionText: string | null) {
 }
 
 async function processCobaltResponse(tg: Telegram, chatId: number, data: any, sourceUrl: string, replyTo?: number) {
-  if (data?.status === "error") throw new Error(data.text || "Cobalt Error");
+  const status = data?.status;
+
+  if (status === "error") {
+    const code = typeof data?.error?.code === "string" ? data.error.code : null;
+    throw new Error(code ? `Cobalt error: ${code}` : "Cobalt error");
+  }
 
   const overallCaptionRaw = extractCobaltCaption(data);
 
-  if (data?.status === "stream" || data?.status === "redirect") {
+  const sendMedia = async (kind: "video" | "photo" | "audio" | "animation" | "document", url: string, cap: string) => {
+    if (kind === "photo") return tg.sendPhoto(chatId, url, cap, replyTo);
+    if (kind === "audio") return tg.sendAudio(chatId, url, cap, replyTo);
+    if (kind === "animation") return tg.sendAnimation(chatId, url, cap, replyTo);
+    if (kind === "document") return tg.sendDocument(chatId, url, cap, replyTo);
+
+    // default: video + fallback to document if Telegram rejects it
+    const r = await tg.sendVideo(chatId, url, cap, replyTo);
+    if (!r) return tg.sendDocument(chatId, url, cap, replyTo);
+    return r;
+  };
+
+  const inferKindFromFilename = (filename?: string | null): "video" | "photo" | "audio" | "animation" | "document" => {
+    const fn = typeof filename === "string" ? filename : "";
+    const ext = (fn.split(".").pop() || "").toLowerCase();
+
+    if (["jpg", "jpeg", "png", "webp"].includes(ext)) return "photo";
+    if (["gif"].includes(ext)) return "animation";
+    if (["mp3", "m4a", "aac", "opus", "ogg", "wav", "flac"].includes(ext)) return "audio";
+    if (["mp4", "mkv", "webm", "mov"].includes(ext)) return "video";
+
+    return "document";
+  };
+
+  if (status === "tunnel" || status === "redirect") {
+    const url = typeof data?.url === "string" ? data.url : null;
+    if (!url) throw new Error("Missing url");
+
     const cap = buildCobaltCaption(sourceUrl, overallCaptionRaw);
-    await tg.sendVideo(chatId, data.url, cap, replyTo);
+    const kind = inferKindFromFilename(data?.filename);
+    await sendMedia(kind, url, cap);
     return;
   }
 
-  if (data?.status === "picker" && Array.isArray(data.picker) && data.picker.length > 0) {
+  if (status === "local-processing") {
+    const tunnels = Array.isArray(data?.tunnel) ? (data.tunnel as unknown[]).filter((x) => typeof x === "string") : [];
+    const lpType = typeof data?.type === "string" ? data.type : "";
+    const outName = typeof data?.output?.filename === "string" ? data.output.filename : null;
+
+    // If it's a single ready-to-send item, try to send it directly.
+    if (tunnels.length === 1) {
+      const cap = buildCobaltCaption(sourceUrl, overallCaptionRaw);
+      const kind =
+        lpType === "gif" ? "animation" : lpType === "audio" ? "audio" : inferKindFromFilename(outName ?? data?.output?.filename);
+      await sendMedia(kind, tunnels[0]!, cap);
+      return;
+    }
+
+    // Otherwise: provide links for manual processing/merge.
+    const linkPart = `🔗 <a href="${escapeAttr(sourceUrl)}">منبع</a>`;
+    const head = `⚠️ این لینک نیاز به پردازش محلی دارد${lpType ? ` (${escapeHtml(lpType)})` : ""}.`;
+    const list = tunnels.slice(0, 4).map((u, i) => `📥 <a href="${escapeAttr(u)}">دانلود فایل ${i + 1}</a>`).join("\n");
+    const msg = truncate([head, list, linkPart].filter(Boolean).join("\n\n"), 3800);
+
+    await tg.sendMessage(chatId, msg, { replyTo });
+    return;
+  }
+
+  if (status === "picker" && Array.isArray(data?.picker) && data.picker.length > 0) {
     const items = data.picker.slice(0, 4);
+
     for (const item of items) {
       const itemCapRaw =
         (typeof item?.caption === "string" && cleanText(item.caption)) ||
@@ -1205,14 +1227,17 @@ async function processCobaltResponse(tg: Telegram, chatId: number, data: any, so
         null;
 
       const cap = buildCobaltCaption(sourceUrl, itemCapRaw ?? overallCaptionRaw);
+      const url = typeof item?.url === "string" ? item.url : null;
+      if (!url) continue;
 
-      if (item?.type === "video") await tg.sendVideo(chatId, item.url, cap, replyTo);
-      else if (item?.type === "photo") await tg.sendPhoto(chatId, item.url, cap, replyTo);
+      if (item?.type === "photo") await sendMedia("photo", url, cap);
+      else if (item?.type === "gif") await sendMedia("animation", url, cap);
+      else await sendMedia("video", url, cap);
     }
     return;
   }
 
-  throw new Error("Unknown response");
+  throw new Error("Unknown Cobalt response");
 }
 
 function sleep(ms: number) {
@@ -1243,16 +1268,29 @@ function markCobaltOk(baseUrl: string, now: number) {
   s.lastOkAt = now;
 }
 
-function markCobaltFail(baseUrl: string, now: number, info: { status?: number; timeout?: boolean }) {
+function markCobaltFail(
+  baseUrl: string,
+  now: number,
+  info: { status?: number; timeout?: boolean; cooldownMs?: number },
+) {
   const s = getCobaltState(baseUrl, now);
   s.failCount = Math.min(50, (s.failCount || 0) + 1);
+
   const st = info.status ?? 0;
-  let cd = COBALT_COOLDOWN_OTHER_MS;
-  if (info.timeout) cd = COBALT_COOLDOWN_TIMEOUT_MS;
-  else if (st === 429) cd = COBALT_COOLDOWN_429_MS;
-  else if (st === 403) cd = COBALT_COOLDOWN_403_MS;
-  else if (st >= 500) cd = COBALT_COOLDOWN_5XX_MS;
-  else if (st === 0) cd = COBALT_COOLDOWN_TIMEOUT_MS;
+
+  let cd = info.cooldownMs;
+  if (!(typeof cd === "number" && Number.isFinite(cd) && cd > 0)) {
+    cd = COBALT_COOLDOWN_OTHER_MS;
+    if (info.timeout) cd = COBALT_COOLDOWN_TIMEOUT_MS;
+    else if (st === 429) cd = COBALT_COOLDOWN_429_MS;
+    else if (st === 403) cd = COBALT_COOLDOWN_403_MS;
+    else if (st >= 500) cd = COBALT_COOLDOWN_5XX_MS;
+    else if (st === 0) cd = COBALT_COOLDOWN_TIMEOUT_MS;
+  }
+
+  // clamp to avoid "infinite" cooldown if headers are weird
+  cd = Math.max(1000, Math.min(24 * 60 * 60_000, Math.floor(cd)));
+
   s.cooldownUntil = Math.max(s.cooldownUntil || 0, now + cd);
 }
 
@@ -1272,11 +1310,19 @@ function sortCobaltBases(bases: string[], now: number) {
   return [...available, ...cooled];
 }
 
-async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number) {
-  const ac = new AbortController();
-  const t = setTimeout(() => ac.abort(), timeoutMs);
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number, ac?: AbortController) {
+  const ctrl = ac ?? new AbortController();
+  const t = setTimeout(() => {
+    try {
+      // AbortController.abort() may not accept a reason in every runtime
+      (ctrl as any).abort?.("timeout");
+    } catch {
+      ctrl.abort();
+    }
+  }, timeoutMs);
+
   try {
-    const res = await fetch(url, { ...init, signal: ac.signal });
+    const res = await fetch(url, { ...init, signal: ctrl.signal });
     clearTimeout(t);
     return { res, timeout: false as const };
   } catch (e) {
@@ -1287,6 +1333,43 @@ async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: numbe
   }
 }
 
+function parseFirstNumberHeader(v: string | null): number | null {
+  if (!v) return null;
+  const token = v.split(",")[0]?.split(";")[0]?.trim();
+  if (!token) return null;
+  const n = Number(token);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+function parseRetryAfterMs(headers: Headers, nowMs: number): number | null {
+  const raw = headers.get("Retry-After");
+  if (!raw) return null;
+
+  const s = raw.trim();
+  const asSeconds = Number(s);
+  if (Number.isFinite(asSeconds) && asSeconds >= 0) return Math.floor(asSeconds * 1000);
+
+  const asDate = Date.parse(s);
+  if (Number.isFinite(asDate)) return Math.max(0, asDate - nowMs);
+
+  return null;
+}
+
+function parseRateLimitResetMs(headers: Headers): number | null {
+  const n = parseFirstNumberHeader(headers.get("RateLimit-Reset"));
+  return n == null ? null : Math.floor(n * 1000);
+}
+
+function bestCooldownFromHeadersMs(headers: Headers, nowMs: number): number | null {
+  // per RateLimit-* spec: Retry-After takes precedence if present
+  return parseRetryAfterMs(headers, nowMs) ?? parseRateLimitResetMs(headers);
+}
+
+function isHtmlResponse(res: Response): boolean {
+  const ct = res.headers.get("content-type")?.toLowerCase() ?? "";
+  return ct.includes("text/html");
+}
+
 async function handleCobalt(tg: Telegram, chatId: number, targetUrl: string, replyTo?: number) {
   await tg.sendChatAction(chatId, "upload_video");
 
@@ -1295,46 +1378,82 @@ async function handleCobalt(tg: Telegram, chatId: number, targetUrl: string, rep
 
   const isTw = isTwitterTarget(targetUrl);
   const timeoutMs = isTw ? COBALT_TIMEOUT_MS_TW : COBALT_TIMEOUT_MS;
-  const baseDelay = isTw ? COBALT_BACKOFF_BASE_MS_TW : COBALT_BACKOFF_BASE_MS;
 
   const bases = sortCobaltBases([...COBALT_INSTANCES], now);
 
+  const body = JSON.stringify({
+    url: targetUrl,
+    downloadMode: "auto",
+    filenameStyle: "basic",
+    videoQuality: "1080",
+    localProcessing: "disabled",
+    youtubeVideoCodec: "h264",
+    convertGif: true,
+    allowH265: false,
+  });
+
   const endpointsForBase = (baseUrl: string) => {
     const base = baseUrl.replace(/\/+$/, "");
+    // per cobalt docs: main endpoint is POST /, but keep /api/json for older forks
     return [base, `${base}/api/json`];
   };
 
-  let attempt = 0;
+  const inFlightCtrls = new Set<AbortController>();
+  const abortAll = () => {
+    for (const c of inFlightCtrls) {
+      try {
+        c.abort();
+      } catch {
+        // ignore
+      }
+    }
+    inFlightCtrls.clear();
+  };
 
-  for (const baseUrl of bases) {
-    const s = getCobaltState(baseUrl, Date.now());
+  const tryBase = async (baseUrl: string): Promise<boolean> => {
+    const s0 = getCobaltState(baseUrl, Date.now());
+    if ((s0.cooldownUntil || 0) > Date.now()) return false;
+
     const endpoints = endpointsForBase(baseUrl);
 
     for (const endpoint of endpoints) {
-      const now2 = Date.now();
-      if (attempt > 0) {
-        const jitter = Math.floor(Math.random() * 180);
-        const step = Math.min(COBALT_BACKOFF_MAX_MS, baseDelay * attempt);
-        const extra = Math.min(800, (s.failCount || 0) * 20);
-        await sleep(step + jitter + extra);
-      }
-      attempt++;
+      if ((getCobaltState(baseUrl, Date.now()).cooldownUntil || 0) > Date.now()) return false;
 
-      const body = JSON.stringify({ url: targetUrl, vCodec: "h264" });
+      const ac = new AbortController();
+      inFlightCtrls.add(ac);
 
       const { res, timeout } = await fetchWithTimeout(
         endpoint,
         { method: "POST", headers: COBALT_HEADERS, body },
         timeoutMs,
+        ac,
       );
 
+      inFlightCtrls.delete(ac);
+
+      const now2 = Date.now();
+
       if (!res) {
-        markCobaltFail(baseUrl, Date.now(), { timeout: true });
+        markCobaltFail(baseUrl, now2, { timeout: true });
+        continue;
+      }
+
+      // quick reject obvious bot-protection/challenges
+      if (isHtmlResponse(res)) {
+        markCobaltFail(baseUrl, now2, { status: res.status || 403, cooldownMs: 2 * 60 * 60_000 });
         continue;
       }
 
       if (!res.ok) {
-        markCobaltFail(baseUrl, Date.now(), { status: res.status });
+        const headerCd = res.status === 429 ? bestCooldownFromHeadersMs(res.headers, now2) : null;
+        markCobaltFail(baseUrl, now2, { status: res.status, cooldownMs: headerCd ?? undefined });
+        continue;
+      }
+
+      // some instances return non-json on success (rare) - treat as failure
+      const ct = res.headers.get("content-type")?.toLowerCase() ?? "";
+      if (!ct.includes("application/json")) {
+        markCobaltFail(baseUrl, now2, { status: 0, cooldownMs: 60 * 60_000 });
         continue;
       }
 
@@ -1342,23 +1461,65 @@ async function handleCobalt(tg: Telegram, chatId: number, targetUrl: string, rep
       try {
         data = await res.json<any>();
       } catch {
-        markCobaltFail(baseUrl, Date.now(), { status: 0 });
+        markCobaltFail(baseUrl, now2, { status: 0 });
         continue;
+      }
+
+      // auth-required instances are effectively unusable without a token
+      if (data?.status === "error" && typeof data?.error?.code === "string") {
+        const code = String(data.error.code);
+        if (code.startsWith("api.auth.")) {
+          markCobaltFail(baseUrl, now2, { status: 401, cooldownMs: 12 * 60 * 60_000 });
+          continue;
+        }
       }
 
       try {
         await processCobaltResponse(tg, chatId, data, targetUrl, replyTo);
         markCobaltOk(baseUrl, Date.now());
+        abortAll();
         return true;
       } catch (e: any) {
-        const st = typeof (data as any)?.statusCode === "number" ? (data as any).statusCode : undefined;
-        markCobaltFail(baseUrl, Date.now(), { status: st ?? 0, timeout: false });
+        // If Cobalt returns a structured error, treat it as a failure (but keep moving to other instances)
+        const errCode = typeof data?.error?.code === "string" ? data.error.code : null;
+        const cd =
+          errCode && (errCode.includes("rate") || errCode.includes("limit"))
+            ? bestCooldownFromHeadersMs(res.headers, now2) ?? undefined
+            : undefined;
+
+        markCobaltFail(baseUrl, Date.now(), { status: 0, cooldownMs: cd });
         void e;
         continue;
       }
     }
+
+    return false;
+  };
+
+  const concurrency = 2;
+  const inFlight = new Set<Promise<boolean>>();
+  let idx = 0;
+
+  const launch = (baseUrl: string) => {
+    let p: Promise<boolean>;
+    p = tryBase(baseUrl).catch(() => false);
+    inFlight.add(p);
+    p.finally(() => inFlight.delete(p));
+    return p;
+  };
+
+  while (idx < bases.length || inFlight.size) {
+    while (inFlight.size < concurrency && idx < bases.length) {
+      launch(bases[idx++]!);
+    }
+
+    if (!inFlight.size) break;
+
+    const ok = await Promise.race(inFlight);
+    if (ok) return true;
   }
 
+  abortAll();
   await tg.sendMessage(chatId, `❌ سرورهای دانلود پاسخگو نیستند. لطفاً دقایقی دیگر تلاش کنید.`, { replyTo });
   return true;
 }
