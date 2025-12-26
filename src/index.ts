@@ -1453,10 +1453,17 @@ function parseInstagramShortcode(urlStr: string): { type: "p" | "reel" | "tv"; s
 function pickInstagramFromGraphql(node: any): InstagramMedia | null {
   if (!node) return null;
 
-  // carousel
+  // carousel: prefer first video, otherwise first photo
   const edges = node?.edge_sidecar_to_children?.edges;
   if (Array.isArray(edges) && edges.length > 0) {
-    return pickInstagramFromGraphql(edges[0]?.node);
+    let firstPhoto: InstagramMedia | null = null;
+    for (const e of edges) {
+      const picked = pickInstagramFromGraphql(e?.node);
+      if (!picked) continue;
+      if (picked.kind === "video") return picked;
+      if (!firstPhoto && picked.kind === "photo") firstPhoto = picked;
+    }
+    return firstPhoto;
   }
 
   const isVideo = Boolean(node?.is_video);
@@ -1472,14 +1479,107 @@ function pickInstagramFromGraphql(node: any): InstagramMedia | null {
   return null;
 }
 
+const IG_APP_ID = "936619743392459";
+
+/**
+ * Decode a JSON string literal payload (e.g. https:\/\/... \u0026 ...)
+ * safely. If decoding fails, returns input.
+ */
+function decodeJsonStringLiteral(raw: string): string {
+  try {
+    // raw is usually already escaped like https:\/\/..., so JSON.parse can decode it
+    return JSON.parse(`"${raw.replace(/"/g, '\\"')}"`);
+  } catch {
+    return raw.replace(/\\\//g, "/");
+  }
+}
+
+function isLikelyIgCdn(url: string): boolean {
+  try {
+    const u = new URL(url);
+    const h = u.hostname.toLowerCase();
+    return (
+      h.includes("fbcdn") ||
+      h.includes("cdninstagram") ||
+      h.endsWith(".cdninstagram.com") ||
+      h.startsWith("scontent") ||
+      h.endsWith(".fbcdn.net")
+    );
+  } catch {
+    return false;
+  }
+}
+
+function firstMatchDecoded(html: string, re: RegExp): string | null {
+  const m = html.match(re);
+  if (!m?.[1]) return null;
+  const v = decodeJsonStringLiteral(m[1]);
+  return v || null;
+}
+
+function extractInstagramFromHtml(html: string): InstagramMedia | null {
+  // Prefer explicit meta tags
+  const ogVideo = firstMetaContent(html, "og:video") || firstMetaContent(html, "og:video:secure_url");
+  if (ogVideo) {
+    const ogImage = firstMetaContent(html, "og:image") || undefined;
+    return { kind: "video", url: ogVideo, thumb: ogImage };
+  }
+  const ogImage = firstMetaContent(html, "og:image");
+  if (ogImage) return { kind: "photo", url: ogImage };
+
+  // Fallback: search common JSON keys inside scripts
+  // video_url":"https:\/\/...mp4..."
+  const videoByKey =
+    firstMatchDecoded(html, /"video_url"\s*:\s*"([^"]+)"/i) ||
+    firstMatchDecoded(html, /"videoUrl"\s*:\s*"([^"]+)"/i) ||
+    null;
+  if (videoByKey && videoByKey.includes(".mp4") && isLikelyIgCdn(videoByKey)) {
+    const thumb =
+      firstMatchDecoded(html, /"display_url"\s*:\s*"([^"]+)"/i) ||
+      firstMatchDecoded(html, /"displayUrl"\s*:\s*"([^"]+)"/i) ||
+      undefined;
+    return { kind: "video", url: videoByKey, thumb: thumb && isLikelyIgCdn(thumb) ? thumb : undefined };
+  }
+
+  const imgByKey =
+    firstMatchDecoded(html, /"display_url"\s*:\s*"([^"]+)"/i) ||
+    firstMatchDecoded(html, /"displayUrl"\s*:\s*"([^"]+)"/i) ||
+    null;
+  if (imgByKey && isLikelyIgCdn(imgByKey)) return { kind: "photo", url: imgByKey };
+
+  // Last resort: any .mp4 URL present in HTML (rare)
+  const anyMp4 =
+    firstMatchDecoded(html, /(https?:\\\/\\\/[^"\\]+?\.mp4[^"\\]*)/i) ||
+    (html.match(/https?:\/\/[^\s"'<>]+?\.mp4[^\s"'<>]*/i)?.[0] ?? null);
+  if (anyMp4 && isLikelyIgCdn(anyMp4)) return { kind: "video", url: anyMp4 };
+
+  return null;
+}
+
 async function tryFetchInstagramJson(canonical: string): Promise<InstagramMedia | null> {
   const url = `${canonical}?__a=1&__d=dis`;
-  const res = await fetch(url, { method: "GET", headers: { ...SOCIAL_HEADERS, accept: "application/json" } });
+  const headers: Record<string, string> = {
+    ...SOCIAL_HEADERS,
+    accept: "application/json",
+    "x-ig-app-id": IG_APP_ID,
+    "x-requested-with": "XMLHttpRequest",
+    referer: canonical,
+    origin: "https://www.instagram.com",
+  };
+
+  const res = await fetch(url, { method: "GET", headers });
   if (!res.ok) return null;
-  const ct = res.headers.get("content-type") || "";
-  if (!ct.includes("json")) return null;
-  const data = await res.json().catch(() => null);
-  if (!data) return null;
+
+  // Sometimes Instagram returns JSON with wrong content-type; be tolerant.
+  const body = await res.text().catch(() => "");
+  if (!body) return null;
+
+  let data: any = null;
+  try {
+    data = JSON.parse(body);
+  } catch {
+    return null;
+  }
 
   // Old-ish shape: graphql.shortcode_media
   const node = data?.graphql?.shortcode_media;
@@ -1506,23 +1606,30 @@ async function tryFetchInstagramJson(canonical: string): Promise<InstagramMedia 
 }
 
 async function tryFetchInstagramEmbed(canonical: string): Promise<InstagramMedia | null> {
-  const url = `${canonical}embed/`;
-  const res = await fetch(url, { method: "GET", headers: SOCIAL_HEADERS });
-  if (!res.ok) return null;
-  const html = await res.text().catch(() => "");
-  if (!html) return null;
+  // captioned/ tends to include richer data across post types
+  const urls = [`${canonical}embed/captioned/`, `${canonical}embed/`, canonical];
 
-  const ogVideo = firstMetaContent(html, "og:video") || firstMetaContent(html, "og:video:secure_url");
-  if (ogVideo) {
-    const ogImage = firstMetaContent(html, "og:image") || undefined;
-    return { kind: "video", url: ogVideo, thumb: ogImage };
+  for (const url of urls) {
+    const res = await fetch(url, {
+      method: "GET",
+      headers: {
+        ...SOCIAL_HEADERS,
+        referer: canonical,
+        origin: "https://www.instagram.com",
+      },
+    });
+    if (!res.ok) continue;
+
+    const html = await res.text().catch(() => "");
+    if (!html) continue;
+
+    const extracted = extractInstagramFromHtml(html);
+    if (extracted) return extracted;
   }
-
-  const ogImage = firstMetaContent(html, "og:image");
-  if (ogImage) return { kind: "photo", url: ogImage };
 
   return null;
 }
+
 
 async function handleInstagramPublicDownload(tg: Telegram, chatId: number, targetUrl: string, replyTo?: number) {
   await tg.sendChatAction(chatId, "upload_video");
