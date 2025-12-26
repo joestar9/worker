@@ -1,3 +1,7 @@
+<start_of_user_uploaded_file: x-ok.txt>
+/**
+ * ENV INTERFACE
+ */
 export interface Env {
   BOT_KV: KVNamespace;
   TG_TOKEN: string;
@@ -5,36 +9,126 @@ export interface Env {
   ADMIN_KEY: string;
 }
 
+/**
+ * TELEGRAM TYPES
+ */
+interface TgUser {
+  id: number;
+  is_bot: boolean;
+  first_name: string;
+  username?: string;
+}
+
+interface TgChat {
+  id: number;
+  type: "private" | "group" | "supergroup" | "channel";
+}
+
+interface TgMessage {
+  message_id: number;
+  from?: TgUser;
+  chat: TgChat;
+  date: number;
+  text?: string;
+  reply_to_message?: TgMessage;
+}
+
+interface TgCallbackQuery {
+  id: string;
+  from: TgUser;
+  message?: TgMessage;
+  data?: string;
+}
+
+interface TgUpdate {
+  update_id: number;
+  message?: TgMessage;
+  edited_message?: TgMessage;
+  callback_query?: TgCallbackQuery;
+}
+
+/**
+ * CONSTANTS & CONFIG
+ */
 const BOT_USERNAME = "worker093578bot";
-const PRICES_JSON_URL =
-  "https://raw.githubusercontent.com/joestar9/price-scraper/refs/heads/main/merged_prices.json";
+const PRICES_JSON_URL = "https://raw.githubusercontent.com/joestar9/price-scraper/refs/heads/main/merged_prices.json";
 
+const COBALT_INSTANCES = [
+  "https://cobalt-api.meowing.de",
+  "https://cobalt-backend.canine.tools",
+  "https://capi.3kh0.net",
+  "https://cobalt-api.kwiatekmiki.com",
+  "https://downloadapi.stuff.solutions",
+  "https://cobalt.canine.tools",
+  "https://api.cobalt.tools",
+  "https://blossom.imput.net",
+  "https://kityune.imput.net",
+  "https://nachos.imput.net",
+  "https://nuko-c.meowing.de",
+  "https://sunny.imput.net",
+];
 
+// Cache Keys
 const KEY_RATES = "rates:v2:latest";
 const KEY_HASH = "rates:v2:hash";
 
+// Time constants
 const PARSE_TTL_MS = 15_000;
 const CONTEXT_TTL_MS = 60_000;
 const PARSE_CACHE_MAX = 5_000;
-
 const BG_REFRESH_AT_MS = 29 * 60_000;
 const FORCE_REFRESH_AT_MS = 45 * 60_000;
-
 const MEM_STORED_TTL_MS = 5_000;
-
 const COOLDOWN_TTL_MS = 5_000;
 const COOLDOWN_MEM_MAX = 20_000;
-
 const MAX_MEDIA_CAPTION_LEN = 950;
 
+// Cobalt Timing
+const COBALT_TIMEOUT_MS = 12_000;
+const COBALT_TIMEOUT_MS_TW = 14_000;
+const COBALT_BACKOFF_BASE_MS = 220;
+const COBALT_BACKOFF_BASE_MS_TW = 320;
+const COBALT_BACKOFF_MAX_MS = 2400;
+const COBALT_COOLDOWN_429_MS = 20 * 60_000;
+const COBALT_COOLDOWN_403_MS = 25 * 60_000;
+const COBALT_COOLDOWN_5XX_MS = 5 * 60_000;
+const COBALT_COOLDOWN_TIMEOUT_MS = 6 * 60_000;
+const COBALT_COOLDOWN_OTHER_MS = 3 * 60_000;
+const COBALT_STATE_TTL_MS = 2 * 60 * 60_000;
 
-const TG_JSON_HEADERS = { "content-type": "application/json" } as const;
-const UA_HEADERS = { "User-Agent": "Mozilla/5.0" } as const;
+// Headers
+const JSON_HEADERS = { "Content-Type": "application/json" };
+const UA_HEADERS = { "User-Agent": "Mozilla/5.0" };
+const SOCIAL_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
+const SOCIAL_HEADERS = {
+  "User-Agent": SOCIAL_UA,
+  "Accept": "text/html,application/json;q=0.9,*/*;q=0.8",
+  "Accept-Language": "en-US,en;q=0.9",
+};
+const COBALT_REQ_HEADERS = {
+  "Accept": "application/json",
+  "Content-Type": "application/json",
+  "User-Agent": "Mozilla/5.0 (compatible; TelegramBot/1.0)",
+  "Origin": "https://cobalt.tools",
+  "Referer": "https://cobalt.tools/",
+};
+
+// Pre-compiled Regex
+const RE_DIGITS_PERSIAN = /[۰-۹٠-٩]/g;
+const RE_PUNCT = /[.,!?؟؛:()[\]{}"'«»]/g;
+const RE_SPACES = /\s+/g;
+const RE_HTML_CHARS = /[&<>"']/g;
+const RE_WHITESPACE_CLEANUP = /[\r\n\u0000]+/g;
+
+/**
+ * DATA MODELS
+ */
+type RateKind = "currency" | "gold" | "crypto";
 
 type Rate = {
   price: number;
   unit: number;
-  kind: "currency" | "gold" | "crypto";
+  kind: RateKind;
   title: string;
   emoji: string;
   fa: string;
@@ -49,18 +143,22 @@ type Stored = {
   rates: Record<string, Rate>;
 };
 
-const parseCache = new Map<
-  string,
-  { ts: number; code: string | null; amount: number; hasAmount: boolean }
->();
+type CobaltState = { failCount: number; cooldownUntil: number; lastOkAt: number; lastSeenAt: number };
+
+/**
+ * IN-MEMORY STATE (Worker Global Scope)
+ */
+const parseCache = new Map<string, { ts: number; code: string | null; amount: number; hasAmount: boolean }>();
 const userContext = new Map<number, { ts: number; code: string }>();
+const cooldownMem = new Map<number, number>();
+const cobaltState = new Map<string, CobaltState>();
 
 let memStored: Stored | null = null;
 let memStoredReadAt = 0;
 
-const cooldownMem = new Map<number, number>();
-
-
+/**
+ * METADATA DEFINITIONS
+ */
 const META: Record<string, { emoji: string; fa: string }> = {
   usd: { emoji: "🇺🇸", fa: "دلار آمریکا" },
   eur: { emoji: "🇪🇺", fa: "یورو" },
@@ -162,45 +260,16 @@ const ALIASES: Array<{ keys: string[]; code: string }> = [
   { keys: ["بیت کوین کش", "bch", "bitcoincash"], code: "bch" },
 ];
 
-const ALIAS_INDEX: Array<{ code: string; spaced: string[]; compact: string[]; maxLen: number }> = (() => {
-  const mapped = ALIASES.map((a) => {
-    const spaced = a.keys
-      .map((k) => stripPunct(norm(String(k))).replace(/\s+/g, " ").trim())
-      .filter(Boolean);
-    const compact = spaced.map((k) => k.replace(/\s+/g, "")).filter(Boolean);
-    spaced.sort((x, y) => y.length - x.length);
-    compact.sort((x, y) => y.length - x.length);
-    const maxLen = Math.max(spaced[0]?.length ?? 0, compact[0]?.length ?? 0);
-    return { code: a.code, spaced, compact, maxLen };
-  });
-  mapped.sort((x, y) => y.maxLen - x.maxLen);
-  return mapped;
-})();
+/**
+ * UTILITIES
+ */
+const DIGIT_MAP: Record<string, string> = {
+  "۰": "0", "۱": "1", "۲": "2", "۳": "3", "۴": "4", "۵": "5", "۶": "6", "۷": "7", "۸": "8", "۹": "9",
+  "٠": "0", "١": "1", "٢": "2", "٣": "3", "٤": "4", "٥": "5", "٦": "6", "٧": "7", "٨": "8", "٩": "9",
+};
 
 function normalizeDigits(input: string) {
-  const map: Record<string, string> = {
-    "۰": "0",
-    "۱": "1",
-    "۲": "2",
-    "۳": "3",
-    "۴": "4",
-    "۵": "5",
-    "۶": "6",
-    "۷": "7",
-    "۸": "8",
-    "۹": "9",
-    "٠": "0",
-    "١": "1",
-    "٢": "2",
-    "٣": "3",
-    "٤": "4",
-    "٥": "5",
-    "٦": "6",
-    "٧": "7",
-    "٨": "8",
-    "٩": "9",
-  };
-  return input.split("").map((ch) => map[ch] ?? ch).join("");
+  return input.replace(RE_DIGITS_PERSIAN, (ch) => DIGIT_MAP[ch] || ch);
 }
 
 function norm(input: string) {
@@ -213,12 +282,11 @@ function norm(input: string) {
 }
 
 function stripPunct(input: string) {
-  return input.replace(/[.,!?؟؛:()[\]{}"'«»]/g, " ").replace(/\s+/g, " ").trim();
+  return input.replace(RE_PUNCT, " ").replace(RE_SPACES, " ").trim();
 }
 
 function formatToman(n: number) {
-  const x = Math.round(n);
-  return x.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 }
 
 function formatUSD(n: number) {
@@ -226,19 +294,16 @@ function formatUSD(n: number) {
   return n.toLocaleString("en-US", { maximumFractionDigits: 2 });
 }
 
+const HTML_ESC_MAP: Record<string, string> = {
+  "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+};
 function escapeHtml(s: string) {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
-function escapeAttr(s: string) {
-  return escapeHtml(s).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  return s.replace(RE_HTML_CHARS, (m) => HTML_ESC_MAP[m]);
 }
 
 function cleanText(s: string) {
   return s
-    .replace(/\r\n/g, "\n")
-    .replace(/\r/g, "\n")
-    .replace(/\u0000/g, "")
+    .replace(RE_WHITESPACE_CLEANUP, "\n")
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .replace(/[ \t]{2,}/g, " ")
@@ -253,27 +318,23 @@ function truncate(s: string, max: number) {
 async function sha256Hex(s: string) {
   const data = new TextEncoder().encode(s);
   const hash = await crypto.subtle.digest("SHA-256", data);
-  const bytes = new Uint8Array(hash);
-  return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-const WORD_CHAR_RE = /[\p{L}\p{N}]/u;
-function isWordChar(ch: string | undefined) {
-  return !!ch && WORD_CHAR_RE.test(ch);
-}
-
-function containsBounded(haystack: string, needle: string) {
-  if (!needle) return false;
-  let from = 0;
-  while (true) {
-    const idx = haystack.indexOf(needle, from);
-    if (idx === -1) return false;
-    const before = haystack[idx - 1];
-    const after = haystack[idx + needle.length];
-    if (!isWordChar(before) && !isWordChar(after)) return true;
-    from = idx + 1;
-  }
-}
+// Optimized ALIAS Indexing
+const ALIAS_INDEX: Array<{ code: string; regex: RegExp; maxLen: number }> = (() => {
+  const mapped = ALIASES.map((a) => {
+    const keys = a.keys.map((k) => stripPunct(norm(k)).replace(RE_SPACES, " ").trim()).filter(Boolean);
+    const compact = keys.map(k => k.replace(RE_SPACES, ""));
+    const allPatterns = Array.from(new Set([...keys, ...compact]));
+    // Pre-compile a single regex for this alias group: /\b(key1|key2|...)\b/u
+    const pattern = allPatterns.sort((x, y) => y.length - x.length).map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+    const regex = new RegExp(`(?:^|\\s|\\b)(?:${pattern})(?:$|\\s|\\b)`, 'u');
+    const maxLen = Math.max(...allPatterns.map(k => k.length), 0);
+    return { code: a.code, regex, maxLen };
+  });
+  return mapped.sort((x, y) => y.maxLen - x.maxLen);
+})();
 
 function parsePersianNumber(tokens: string[]): number | null {
   const ones: Record<string, number> = { "یک": 1, "یه": 1, "دو": 2, "سه": 3, "چهار": 4, "پنج": 5, "شش": 6, "شیش": 6, "هفت": 7, "هشت": 8, "نه": 9 };
@@ -319,44 +380,43 @@ function parseDigitsWithScale(text: string): number | null {
   const num = Number(m[1]);
   if (!Number.isFinite(num) || num <= 0) return null;
   const suf = (m[2] || "").toLowerCase();
-  const mul =
-    suf === "هزار" || suf === "k"
-      ? 1e3
-      : suf === "میلیون" || suf === "ملیون" || suf === "m"
-        ? 1e6
-        : suf === "میلیارد" || suf === "بیلیون" || suf === "b"
-          ? 1e9
-          : suf === "تریلیون"
-            ? 1e12
-            : 1;
+  
+  let mul = 1;
+  if (suf === "هزار" || suf === "k") mul = 1e3;
+  else if (suf === "میلیون" || suf === "ملیون" || suf === "m") mul = 1e6;
+  else if (suf === "میلیارد" || suf === "بیلیون" || suf === "b") mul = 1e9;
+  else if (suf === "تریلیون") mul = 1e12;
+  
   return num * mul;
 }
 
 function findCode(textNorm: string, rates: Record<string, Rate>) {
-  const cleaned = stripPunct(textNorm).replace(/\s+/g, " ").trim();
-  const compact = cleaned.replace(/\s+/g, "");
+  const cleaned = stripPunct(textNorm).replace(RE_SPACES, " ").trim();
+  const compact = cleaned.replace(RE_SPACES, "");
 
+  // Priority Check 1: Pre-indexed Aliases
   for (const a of ALIAS_INDEX) {
-    for (const k of a.spaced) if (containsBounded(cleaned, k)) return a.code;
-    for (const k of a.compact) if (containsBounded(compact, k)) return a.code;
+    if (a.regex.test(cleaned)) return a.code;
   }
 
-  if (containsBounded(cleaned, "دلار") && (containsBounded(cleaned, "کانادا") || containsBounded(cleaned, "کاندا") || containsBounded(cleaned, "کانادایی") || containsBounded(cleaned, "کاندایی"))) {
+  // Priority Check 2: Specific ambiguous cases
+  if (cleaned.includes("دلار") && /کانادا|کاندا|کانادایی|کاندایی/.test(cleaned)) {
     if (rates["cad"]) return "cad";
   }
-
-  if (containsBounded(cleaned, "دینار") && (containsBounded(cleaned, "عراق") || containsBounded(cleaned, "عراقی"))) {
+  if (cleaned.includes("دینار") && /عراق|عراقی/.test(cleaned)) {
     if (rates["iqd"]) return "iqd";
   }
 
+  // Priority Check 3: English symbols (e.g., "btc")
   const m = cleaned.match(/\b([a-z]{3,10})\b/i);
   if (m) {
     const candidate = m[1].toLowerCase();
     if (rates[candidate]) return candidate;
   }
 
+  // Priority Check 4: Exact Title Match
   for (const key in rates) {
-    const t = rates[key]?.title ? stripPunct(norm(rates[key].title)).replace(/\s+/g, "") : "";
+    const t = rates[key]?.title ? stripPunct(norm(rates[key].title)).replace(RE_SPACES, "") : "";
     if (compact === key || (t && compact === t)) return key;
   }
 
@@ -364,7 +424,7 @@ function findCode(textNorm: string, rates: Record<string, Rate>) {
 }
 
 function extractAmountOrNull(textNorm: string): number | null {
-  const cleaned = stripPunct(textNorm).replace(/\s+/g, " ").trim();
+  const cleaned = stripPunct(textNorm).replace(RE_SPACES, " ").trim();
   const digitScaled = parseDigitsWithScale(cleaned);
   if (digitScaled != null && digitScaled > 0) return digitScaled;
 
@@ -377,22 +437,16 @@ function extractAmountOrNull(textNorm: string): number | null {
       if (n != null && n > 0) return n;
     }
   }
-
   return null;
 }
 
 function pruneParseCache(now: number) {
   if (parseCache.size <= PARSE_CACHE_MAX) return;
-  const keys: string[] = [];
-  for (const [k, v] of parseCache) if (now - v.ts > PARSE_TTL_MS) keys.push(k);
-  for (const k of keys) parseCache.delete(k);
+  for (const [k, v] of parseCache) if (now - v.ts > PARSE_TTL_MS) parseCache.delete(k);
   if (parseCache.size <= PARSE_CACHE_MAX) return;
-  let i = 0;
   for (const k of parseCache.keys()) {
     parseCache.delete(k);
-    i++;
     if (parseCache.size <= PARSE_CACHE_MAX) break;
-    if (i > PARSE_CACHE_MAX) break;
   }
 }
 
@@ -422,7 +476,7 @@ function getParsedIntent(userId: number, textNorm: string, rates: Record<string,
 
 function normalizeCommand(textNorm: string) {
   const t = stripPunct(textNorm).trim();
-  const first = t.split(/\s+/)[0] || "";
+  const first = t.split(RE_SPACES)[0] || "";
   return first.split("@")[0];
 }
 
@@ -430,25 +484,20 @@ function pruneCooldownMem(now: number) {
   if (cooldownMem.size <= COOLDOWN_MEM_MAX) return;
   for (const [k, exp] of cooldownMem) if (exp <= now) cooldownMem.delete(k);
   if (cooldownMem.size <= COOLDOWN_MEM_MAX) return;
-  let i = 0;
   for (const k of cooldownMem.keys()) {
     cooldownMem.delete(k);
-    i++;
     if (cooldownMem.size <= COOLDOWN_MEM_MAX) break;
-    if (i > COOLDOWN_MEM_MAX) break;
   }
 }
 
 class Telegram {
-  private base: string;
-  constructor(token: string) {
-    this.base = `https://api.telegram.org/bot${token}`;
-  }
+  constructor(private token: string) {}
+
   private async call(method: string, payload: unknown, logOnFail = false) {
     try {
-      const res = await fetch(`${this.base}/${method}`, {
+      const res = await fetch(`https://api.telegram.org/bot${this.token}/${method}`, {
         method: "POST",
-        headers: TG_JSON_HEADERS,
+        headers: JSON_HEADERS,
         body: JSON.stringify(payload ?? {}),
       });
       if (!res.ok) {
@@ -461,6 +510,7 @@ class Telegram {
       return null;
     }
   }
+
   sendMessage(chatId: number, text: string, opts?: { replyTo?: number; replyMarkup?: any }) {
     const body: any = { chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true };
     if (opts?.replyTo) {
@@ -470,19 +520,21 @@ class Telegram {
     if (opts?.replyMarkup) body.reply_markup = opts.replyMarkup;
     return this.call("sendMessage", body, false);
   }
+
   editMessageText(chatId: number, messageId: number, text: string, replyMarkup?: any) {
     const body: any = { chat_id: chatId, message_id: messageId, text, parse_mode: "HTML", disable_web_page_preview: true };
     if (replyMarkup) body.reply_markup = replyMarkup;
     return this.call("editMessageText", body, false);
   }
+
   answerCallbackQuery(id: string, text?: string) {
-    const body: any = { callback_query_id: id };
-    if (text) body.text = text;
-    return this.call("answerCallbackQuery", body, false);
+    return this.call("answerCallbackQuery", { callback_query_id: id, text }, false);
   }
+
   sendChatAction(chatId: number, action: string) {
     return this.call("sendChatAction", { chat_id: chatId, action }, false);
   }
+
   sendVideo(chatId: number, videoUrl: string, caption: string, replyTo?: number) {
     const body: any = { chat_id: chatId, video: videoUrl, caption, parse_mode: "HTML" };
     if (replyTo) {
@@ -491,6 +543,7 @@ class Telegram {
     }
     return this.call("sendVideo", body, true);
   }
+
   sendPhoto(chatId: number, photoUrl: string, caption: string, replyTo?: number) {
     const body: any = { chat_id: chatId, photo: photoUrl, caption, parse_mode: "HTML" };
     if (replyTo) {
@@ -498,14 +551,6 @@ class Telegram {
       body.allow_sending_without_reply = true;
     }
     return this.call("sendPhoto", body, false);
-  }
-  sendDocument(chatId: number, fileUrl: string, caption: string, replyTo?: number) {
-    const body: any = { chat_id: chatId, document: fileUrl, caption, parse_mode: "HTML" };
-    if (replyTo) {
-      body.reply_to_message_id = replyTo;
-      body.allow_sending_without_reply = true;
-    }
-    return this.call("sendDocument", body, false);
   }
 }
 
@@ -527,11 +572,10 @@ function parseNumberLoose(v: unknown): number | null {
 }
 
 function normalizeKeyFromTitle(title: string) {
-  const cleaned = stripPunct(title.toLowerCase()).replace(/\s+/g, " ").trim();
-  return cleaned.replace(/\s+/g, "");
+  return stripPunct(title.toLowerCase()).replace(RE_SPACES, " ").trim().replace(RE_SPACES, "");
 }
 
-const NAME_TO_CODE: Record<string, { code: string; kind: Rate["kind"]; fa: string; emoji: string }> = {
+const NAME_TO_CODE: Record<string, { code: string; kind: RateKind; fa: string; emoji: string }> = {
   "us dollar": { code: "usd", kind: "currency", fa: "دلار آمریکا", emoji: "🇺🇸" },
   "euro": { code: "eur", kind: "currency", fa: "یورو", emoji: "🇪🇺" },
   "british pound": { code: "gbp", kind: "currency", fa: "پوند انگلیس", emoji: "🇬🇧" },
@@ -600,16 +644,18 @@ async function fetchAndMergeData(_env: Env): Promise<{ stored: Stored; rawHash: 
   const fetchedAtMs = Date.now();
   let usdToman: number | null = null;
 
+  // Pass 1: Find USD price
   for (const row of arr) {
-    if (!row?.name) continue;
-    const { cleanName } = extractUnitFromName(String(row.name));
-    if (cleanName.toLowerCase() === "us dollar") {
-      const n = parseNumberLoose(row.price);
-      if (n != null) usdToman = n;
-      break;
+    if (row?.name && String(row.name).trim().toLowerCase().includes("us dollar")) {
+        const { cleanName } = extractUnitFromName(String(row.name));
+        if (cleanName.toLowerCase() === "us dollar") {
+             const n = parseNumberLoose(row.price);
+             if (n != null) { usdToman = n; break; }
+        }
     }
   }
 
+  // Pass 2: Process all
   for (const row of arr) {
     if (!row?.name) continue;
 
@@ -621,7 +667,7 @@ async function fetchAndMergeData(_env: Env): Promise<{ stored: Stored; rawHash: 
     const mapped = NAME_TO_CODE[nameLower];
     const code = mapped?.code ?? normalizeKeyFromTitle(cleanName);
 
-    let kind: Rate["kind"] = mapped?.kind ?? "currency";
+    let kind: RateKind = mapped?.kind ?? "currency";
     let tomanPrice = priceNum;
     let usdPrice: number | undefined;
     let change24h: number | undefined;
@@ -669,6 +715,7 @@ async function refreshRates(env: Env) {
     await env.BOT_KV.put(KEY_HASH, rawHash);
     await env.BOT_KV.put(KEY_RATES, JSON.stringify(stored));
   } else {
+    // Refresh TTL if content matches but just to keep it alive
     const prev = await env.BOT_KV.get(KEY_RATES);
     if (!prev) await env.BOT_KV.put(KEY_RATES, JSON.stringify(stored));
   }
@@ -714,7 +761,7 @@ function chunkText(s: string, maxLen = 3500) {
 }
 
 function getUpdateTimeStr(stored: Stored) {
-  const date = new Date(stored.fetchedAtMs + 3.5 * 3600_000);
+  const date = new Date(stored.fetchedAtMs + 3.5 * 3600_000); // Tehran Offset rough approx
   return date.toISOString().substr(11, 5);
 }
 
@@ -789,7 +836,6 @@ function buildAll(stored: Stored) {
 }
 
 const PRICE_PAGE_SIZE = 8;
-
 type PriceCategory = "fiat" | "crypto";
 type PriceListItem = { code: string; category: PriceCategory; emoji: string; name: string; price: string };
 
@@ -813,7 +859,7 @@ function clampPage(page: number, totalPages: number) {
 }
 
 function shortColText(s: string, max = 18) {
-  const t = s.replace(/\s+/g, " ").trim();
+  const t = s.replace(RE_SPACES, " ").trim();
   if (t.length <= max) return t;
   return t.slice(0, max - 1) + "…";
 }
@@ -871,9 +917,7 @@ function buildPriceItems(stored: Stored, category: PriceCategory): PriceListItem
     const priceStr = formatToman(baseToman);
     const meta = META[c] ?? { emoji: "💱", fa: r.title || r.fa || c.toUpperCase() };
     items.push({ code: c, category, emoji: meta.emoji, name: shortColText(showUnit ? `${baseAmount} ${meta.fa}` : meta.fa, 20), price: shortColText(`${priceStr} ت`, 16) });
-    void meta;
   }
-
   return items;
 }
 
@@ -1028,11 +1072,10 @@ function getHelpMessage() {
 🔸 نرخ تتر/دلار از بازار آزاد گرفته می‌شود.`;
 }
 
-
-function pickSocialUrl(text: string): string | null {
+function pickCobaltUrl(text: string): string | null {
   const m = text.match(/https?:\/\/[^\s<>()]+/i);
   if (!m) return null;
-  const raw = m[0].replace(/[)\]}>,.!?؟؛:]+$/g, "");
+  const raw = m[0].replace(RE_PUNCT, ""); // Use regex cleaner
   try {
     const u = new URL(raw);
     const h = u.hostname.toLowerCase();
@@ -1063,72 +1106,132 @@ function isTwitterTarget(urlStr: string) {
   }
 }
 
-const SOCIAL_UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
-
-const SOCIAL_HEADERS: Record<string, string> = {
-  "user-agent": SOCIAL_UA,
-  accept: "text/html,application/json;q=0.9,*/*;q=0.8",
-  "accept-language": "en-US,en;q=0.9",
-};
-
-function buildProxyUrl(origin: string, mediaUrl: string): string {
-  const u = new URL("/proxy", origin);
-  u.searchParams.set("u", mediaUrl);
-  return u.toString();
+function extractCobaltCaption(data: any): string | null {
+  const candidates: unknown[] = [
+    data?.caption, data?.description, data?.title,
+    data?.meta?.caption, data?.meta?.description, data?.meta?.title,
+    data?.metadata?.caption, data?.metadata?.description, data?.metadata?.title,
+    data?.post?.caption, data?.post?.text,
+    data?.tweet?.full_text, data?.tweet?.fullText, data?.tweet?.text,
+    data?.statusText,
+  ];
+  for (const c of candidates) {
+    if (typeof c === "string") {
+      const t = cleanText(c);
+      if (t) return t;
+    }
+  }
+  return null;
 }
 
-function isAllowedProxyTarget(mediaUrl: string): boolean {
-  // prevent open-proxy abuse; only allow Instagram CDN urls
-  return isLikelyIgCdn(mediaUrl);
+function buildCobaltCaption(sourceUrl: string, captionText: string | null) {
+  const linkPart = `🔗 <a href="${escapeHtml(sourceUrl)}">منبع</a>`;
+  const cap = captionText ? escapeHtml(cleanText(captionText)) : "";
+  const out = cap ? `${cap}\n\n${linkPart}` : linkPart;
+  return truncate(out, MAX_MEDIA_CAPTION_LEN);
 }
 
-async function handleProxy(req: Request): Promise<Response> {
-  const url = new URL(req.url);
-  const target = url.searchParams.get("u");
-  if (!target) return new Response("missing u", { status: 400 });
+async function processCobaltResponse(tg: Telegram, chatId: number, data: any, sourceUrl: string, replyTo?: number) {
+  if (data?.status === "error") throw new Error(data.text || "Cobalt Error");
 
-  let mediaUrl: string;
+  const overallCaptionRaw = extractCobaltCaption(data);
+
+  if (data?.status === "stream" || data?.status === "redirect") {
+    const cap = buildCobaltCaption(sourceUrl, overallCaptionRaw);
+    await tg.sendVideo(chatId, data.url, cap, replyTo);
+    return;
+  }
+
+  if (data?.status === "picker" && Array.isArray(data.picker) && data.picker.length > 0) {
+    const items = data.picker.slice(0, 4);
+    for (const item of items) {
+      const itemCapRaw =
+        (typeof item?.caption === "string" && cleanText(item.caption)) ||
+        (typeof item?.description === "string" && cleanText(item.description)) ||
+        (typeof item?.title === "string" && cleanText(item.title)) ||
+        null;
+
+      const cap = buildCobaltCaption(sourceUrl, itemCapRaw ?? overallCaptionRaw);
+
+      if (item?.type === "video") await tg.sendVideo(chatId, item.url, cap, replyTo);
+      else if (item?.type === "photo") await tg.sendPhoto(chatId, item.url, cap, replyTo);
+    }
+    return;
+  }
+  throw new Error("Unknown response");
+}
+
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+function pruneCobaltState(now: number) {
+  for (const [k, v] of cobaltState) {
+    if (now - v.lastSeenAt > COBALT_STATE_TTL_MS) cobaltState.delete(k);
+  }
+}
+
+function getCobaltState(key: string, now: number): CobaltState {
+  const prev = cobaltState.get(key);
+  if (prev) {
+    prev.lastSeenAt = now;
+    return prev;
+  }
+  const s: CobaltState = { failCount: 0, cooldownUntil: 0, lastOkAt: 0, lastSeenAt: now };
+  cobaltState.set(key, s);
+  return s;
+}
+
+function markCobaltOk(baseUrl: string, now: number) {
+  const s = getCobaltState(baseUrl, now);
+  s.failCount = 0;
+  s.cooldownUntil = 0;
+  s.lastOkAt = now;
+}
+
+function markCobaltFail(baseUrl: string, now: number, info: { status?: number; timeout?: boolean }) {
+  const s = getCobaltState(baseUrl, now);
+  s.failCount = Math.min(50, (s.failCount || 0) + 1);
+  const st = info.status ?? 0;
+  let cd = COBALT_COOLDOWN_OTHER_MS;
+  if (info.timeout) cd = COBALT_COOLDOWN_TIMEOUT_MS;
+  else if (st === 429) cd = COBALT_COOLDOWN_429_MS;
+  else if (st === 403) cd = COBALT_COOLDOWN_403_MS;
+  else if (st >= 500) cd = COBALT_COOLDOWN_5XX_MS;
+  else if (st === 0) cd = COBALT_COOLDOWN_TIMEOUT_MS;
+  s.cooldownUntil = Math.max(s.cooldownUntil || 0, now + cd);
+}
+
+function sortCobaltBases(bases: string[], now: number) {
+  const scored = bases.map((b) => {
+    const s = cobaltState.get(b);
+    const fail = s?.failCount ?? 0;
+    const cool = s?.cooldownUntil ?? 0;
+    const okAt = s?.lastOkAt ?? 0;
+    const inCool = cool > now;
+    const score = (inCool ? 10_000 : 0) + fail * 50 - okAt / 1e12;
+    return { b, score, inCool };
+  });
+  scored.sort((x, y) => x.score - y.score);
+  const available = scored.filter((x) => !x.inCool).map((x) => x.b);
+  const cooled = scored.filter((x) => x.inCool).map((x) => x.b);
+  return [...available, ...cooled];
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number) {
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), timeoutMs);
   try {
-    const u = new URL(target);
-    if (u.protocol !== "https:") return new Response("only https", { status: 400 });
-    mediaUrl = u.toString();
-  } catch {
-    return new Response("bad url", { status: 400 });
+    const res = await fetch(url, { ...init, signal: ac.signal });
+    clearTimeout(t);
+    return { res, timeout: false as const };
+  } catch (e) {
+    clearTimeout(t);
+    const msg = String((e as any)?.name ?? "") + ":" + String((e as any)?.message ?? e);
+    const isTimeout = msg.toLowerCase().includes("abort") || msg.toLowerCase().includes("timeout");
+    return { res: null as Response | null, timeout: isTimeout as const };
   }
-
-  if (!isAllowedProxyTarget(mediaUrl)) return new Response("forbidden", { status: 403 });
-
-  const headers = new Headers();
-  headers.set("user-agent", SOCIAL_UA);
-  headers.set("accept", "*/*");
-  headers.set("accept-language", "en-US,en;q=0.9");
-  headers.set("referer", "https://www.instagram.com/");
-  headers.set("origin", "https://www.instagram.com");
-
-  const range = req.headers.get("range");
-  if (range) headers.set("range", range);
-
-  const upstream = await fetch(mediaUrl, { method: "GET", headers, redirect: "follow" });
-
-  const ct = upstream.headers.get("content-type") || "";
-  if (
-    upstream.ok &&
-    ct &&
-    !ct.startsWith("video/") &&
-    !ct.startsWith("image/") &&
-    !ct.includes("octet-stream")
-  ) {
-    return new Response("unsupported content-type", { status: 415 });
-  }
-
-  const outHeaders = new Headers(upstream.headers);
-  outHeaders.delete("set-cookie");
-  outHeaders.set("cache-control", "public, max-age=120");
-
-  return new Response(upstream.body, { status: upstream.status, headers: outHeaders });
 }
-
 
 function isInstagramTarget(urlStr: string) {
   try {
@@ -1140,13 +1243,13 @@ function isInstagramTarget(urlStr: string) {
   }
 }
 
-async function handlePublicDownload(tg: Telegram, chatId: number, targetUrl: string, origin: string, replyTo?: number) {
+async function handlePublicDownload(tg: Telegram, chatId: number, targetUrl: string, replyTo?: number) {
   if (isTwitterTarget(targetUrl)) {
     await handleTwitterPublicDownload(tg, chatId, targetUrl, replyTo);
     return;
   }
   if (isInstagramTarget(targetUrl)) {
-    await handleInstagramPublicDownload(tg, chatId, targetUrl, origin, replyTo);
+    await handleInstagramPublicDownload(tg, chatId, targetUrl, replyTo);
     return;
   }
   await tg.sendMessage(chatId, "❌ این لینک پشتیبانی نمی‌شود.", { replyTo });
@@ -1164,9 +1267,7 @@ async function resolveFinalUrlIfShortened(urlStr: string, maxHops = 2): Promise<
     const h = u.hostname.toLowerCase();
     if (h !== "t.co") return current;
 
-    // Follow redirect (Cloudflare fetch will follow by default). We use GET to ensure we get final url.
     const res = await fetch(current, { method: "GET", redirect: "follow", headers: SOCIAL_HEADERS });
-    // If it fails, keep current
     if (!res.ok) return current;
     const finalUrl = (res as any).url || current;
     if (finalUrl === current) return current;
@@ -1178,10 +1279,8 @@ async function resolveFinalUrlIfShortened(urlStr: string, maxHops = 2): Promise<
 function extractTweetId(urlStr: string): string | null {
   try {
     const u = new URL(urlStr);
-    // allow alternative frontends too (fxtwitter/vxtwitter/fixupx etc.)
     const m = u.pathname.match(/\/status\/(\d+)/i);
     if (m?.[1]) return m[1];
-    // Sometimes query contains id
     const qid = u.searchParams.get("id");
     if (qid && /^\d+$/.test(qid)) return qid;
     return null;
@@ -1198,7 +1297,6 @@ function pickBestMp4Variant(variants: any[] | undefined | null): string | null {
     const url = typeof v?.url === "string" ? v.url : "";
     const br = typeof v?.bitrate === "number" ? v.bitrate : -1;
     if (!url) continue;
-    // prefer mp4
     if (ct.includes("video/mp4")) {
       if (!best || br > best.bitrate) best = { url, bitrate: br };
     }
@@ -1206,13 +1304,10 @@ function pickBestMp4Variant(variants: any[] | undefined | null): string | null {
   return best?.url ?? null;
 }
 
-type TwitterMedia =
-  | { kind: "video"; url: string }
-  | { kind: "photo"; url: string };
+type TwitterMedia = { kind: "video"; url: string } | { kind: "photo"; url: string };
 
 function pickTwitterMedia(data: any): TwitterMedia | null {
   const mediaDetails = Array.isArray(data?.mediaDetails) ? data.mediaDetails : [];
-  // Prefer video if present
   for (const m of mediaDetails) {
     const type = typeof m?.type === "string" ? m.type : "";
     if (type === "video" || type === "animated_gif") {
@@ -1223,7 +1318,6 @@ function pickTwitterMedia(data: any): TwitterMedia | null {
       if (url) return { kind: "video", url };
     }
   }
-  // Photos
   for (const m of mediaDetails) {
     const type = typeof m?.type === "string" ? m.type : "";
     if (type === "photo") {
@@ -1231,28 +1325,24 @@ function pickTwitterMedia(data: any): TwitterMedia | null {
       if (url) return { kind: "photo", url };
     }
   }
-  // Some responses include `photos` array with `url`
   const photos = Array.isArray(data?.photos) ? data.photos : [];
   if (photos[0]?.url) return { kind: "photo", url: String(photos[0].url) };
-
   return null;
 }
 
 function buildTwitterCaption(data: any): string {
   const user = data?.user?.screen_name ? `@${String(data.user.screen_name)}` : "";
   const text = typeof data?.text === "string" ? data.text : "";
-  const t = cleanText(text).slice(0, 700); // keep caption short for TG
+  const t = cleanText(text).slice(0, 700);
   const parts = [user, t].filter(Boolean);
   return escapeHtml(parts.join("\n"));
 }
 
 async function fetchTweetResult(tweetId: string): Promise<any | null> {
-  // Undocumented but widely used by the official embed flow; may be flaky.
-  // We try a couple random tokens (some endpoints return 200 + empty body randomly).
   for (let attempt = 0; attempt < 3; attempt++) {
     const token = String(Math.floor(Math.random() * 1e12));
     const url = `https://cdn.syndication.twimg.com/tweet-result?id=${tweetId}&token=${token}&lang=en`;
-    const res = await fetch(url, { method: "GET", headers: { ...SOCIAL_HEADERS, accept: "application/json" } });
+    const res = await fetch(url, { method: "GET", headers: { ...SOCIAL_HEADERS, "Accept": "application/json" } });
     if (!res.ok) continue;
     const txt = await res.text().catch(() => "");
     if (!txt || txt.trim().length < 5) continue;
@@ -1267,7 +1357,6 @@ async function fetchTweetResult(tweetId: string): Promise<any | null> {
 
 async function handleTwitterPublicDownload(tg: Telegram, chatId: number, targetUrl: string, replyTo?: number) {
   await tg.sendChatAction(chatId, "upload_video");
-
   const finalUrl = await resolveFinalUrlIfShortened(targetUrl);
   const tweetId = extractTweetId(finalUrl);
   if (!tweetId) {
@@ -1277,9 +1366,7 @@ async function handleTwitterPublicDownload(tg: Telegram, chatId: number, targetU
 
   const data = await fetchTweetResult(tweetId);
   if (!data) {
-    await tg.sendMessage(chatId, "❌ دریافت اطلاعات توییت ناموفق بود (ممکنه لینک خصوصی/حذف شده باشه یا سرویس موقتاً محدود شده باشه).", {
-      replyTo,
-    });
+    await tg.sendMessage(chatId, "❌ دریافت اطلاعات توییت ناموفق بود.", { replyTo });
     return;
   }
 
@@ -1290,17 +1377,13 @@ async function handleTwitterPublicDownload(tg: Telegram, chatId: number, targetU
   }
 
   const caption = buildTwitterCaption(data);
-
   if (media.kind === "video") {
-    const sent = await tg.sendVideo(chatId, buildProxyUrl(origin, media.url), caption, replyTo);
-    if (!sent) {
-      // fallback (TG sometimes rejects direct video urls)
-      await tg.sendMessage(chatId, `✅ لینک ویدیو:\n${escapeHtml(media.url)}`, { replyTo });
-    }
+    const sent = await tg.sendVideo(chatId, media.url, caption, replyTo);
+    if (!sent) await tg.sendMessage(chatId, `✅ لینک ویدیو:\n${escapeHtml(media.url)}`, { replyTo });
     return;
   }
 
-  await tg.sendPhoto(chatId, buildProxyUrl(origin, media.url), caption, replyTo);
+  await tg.sendPhoto(chatId, media.url, caption, replyTo);
 }
 
 function decodeHtmlEntities(s: string) {
@@ -1313,16 +1396,13 @@ function decodeHtmlEntities(s: string) {
 }
 
 function firstMetaContent(html: string, propertyOrName: string): string | null {
-  // matches: <meta property="og:video" content="...">
   const re = new RegExp(`<meta\\s+(?:property|name)="${propertyOrName.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&")}"\\s+content="([^"]+)"`, "i");
   const m = html.match(re);
   if (!m?.[1]) return null;
   return decodeHtmlEntities(m[1]);
 }
 
-type InstagramMedia =
-  | { kind: "video"; url: string; thumb?: string }
-  | { kind: "photo"; url: string };
+type InstagramMedia = { kind: "video"; url: string; thumb?: string } | { kind: "photo"; url: string };
 
 function parseInstagramShortcode(urlStr: string): { type: "p" | "reel" | "tv"; shortcode: string } | null {
   try {
@@ -1330,9 +1410,7 @@ function parseInstagramShortcode(urlStr: string): { type: "p" | "reel" | "tv"; s
     const p = u.pathname.replace(/\/+$/, "");
     const m = p.match(/^\/(p|reel|tv)\/([A-Za-z0-9_-]+)/);
     if (!m) return null;
-    const type = m[1] as "p" | "reel" | "tv";
-    const shortcode = m[2];
-    return { type, shortcode };
+    return { type: m[1] as "p" | "reel" | "tv", shortcode: m[2] };
   } catch {
     return null;
   }
@@ -1340,8 +1418,6 @@ function parseInstagramShortcode(urlStr: string): { type: "p" | "reel" | "tv"; s
 
 function pickInstagramFromGraphql(node: any): InstagramMedia | null {
   if (!node) return null;
-
-  // carousel: prefer first video, otherwise first photo
   const edges = node?.edge_sidecar_to_children?.edges;
   if (Array.isArray(edges) && edges.length > 0) {
     let firstPhoto: InstagramMedia | null = null;
@@ -1353,29 +1429,21 @@ function pickInstagramFromGraphql(node: any): InstagramMedia | null {
     }
     return firstPhoto;
   }
-
   const isVideo = Boolean(node?.is_video);
   if (isVideo && typeof node?.video_url === "string" && node.video_url) {
     const thumb = typeof node?.display_url === "string" ? node.display_url : undefined;
     return { kind: "video", url: node.video_url, thumb };
   }
-
   if (typeof node?.display_url === "string" && node.display_url) {
     return { kind: "photo", url: node.display_url };
   }
-
   return null;
 }
 
 const IG_APP_ID = "936619743392459";
 
-/**
- * Decode a JSON string literal payload (e.g. https:\/\/... \u0026 ...)
- * safely. If decoding fails, returns input.
- */
 function decodeJsonStringLiteral(raw: string): string {
   try {
-    // raw is usually already escaped like https:\/\/..., so JSON.parse can decode it
     return JSON.parse(`"${raw.replace(/"/g, '\\"')}"`);
   } catch {
     return raw.replace(/\\\//g, "/");
@@ -1406,7 +1474,6 @@ function firstMatchDecoded(html: string, re: RegExp): string | null {
 }
 
 function extractInstagramFromHtml(html: string): InstagramMedia | null {
-  // Prefer explicit meta tags
   const ogVideo = firstMetaContent(html, "og:video") || firstMetaContent(html, "og:video:secure_url");
   if (ogVideo) {
     const ogImage = firstMetaContent(html, "og:image") || undefined;
@@ -1415,31 +1482,14 @@ function extractInstagramFromHtml(html: string): InstagramMedia | null {
   const ogImage = firstMetaContent(html, "og:image");
   if (ogImage) return { kind: "photo", url: ogImage };
 
-  // Fallback: search common JSON keys inside scripts
-  // video_url":"https:\/\/...mp4..."
-  const videoByKey =
-    firstMatchDecoded(html, /"video_url"\s*:\s*"([^"]+)"/i) ||
-    firstMatchDecoded(html, /"videoUrl"\s*:\s*"([^"]+)"/i) ||
-    null;
+  const videoByKey = firstMatchDecoded(html, /"video_url"\s*:\s*"([^"]+)"/i) || firstMatchDecoded(html, /"videoUrl"\s*:\s*"([^"]+)"/i);
   if (videoByKey && videoByKey.includes(".mp4") && isLikelyIgCdn(videoByKey)) {
-    const thumb =
-      firstMatchDecoded(html, /"display_url"\s*:\s*"([^"]+)"/i) ||
-      firstMatchDecoded(html, /"displayUrl"\s*:\s*"([^"]+)"/i) ||
-      undefined;
+    const thumb = firstMatchDecoded(html, /"display_url"\s*:\s*"([^"]+)"/i) || firstMatchDecoded(html, /"displayUrl"\s*:\s*"([^"]+)"/i) || undefined;
     return { kind: "video", url: videoByKey, thumb: thumb && isLikelyIgCdn(thumb) ? thumb : undefined };
   }
 
-  const imgByKey =
-    firstMatchDecoded(html, /"display_url"\s*:\s*"([^"]+)"/i) ||
-    firstMatchDecoded(html, /"displayUrl"\s*:\s*"([^"]+)"/i) ||
-    null;
+  const imgByKey = firstMatchDecoded(html, /"display_url"\s*:\s*"([^"]+)"/i) || firstMatchDecoded(html, /"displayUrl"\s*:\s*"([^"]+)"/i);
   if (imgByKey && isLikelyIgCdn(imgByKey)) return { kind: "photo", url: imgByKey };
-
-  // Last resort: any .mp4 URL present in HTML (rare)
-  const anyMp4 =
-    firstMatchDecoded(html, /(https?:\\\/\\\/[^"\\]+?\.mp4[^"\\]*)/i) ||
-    (html.match(/https?:\/\/[^\s"'<>]+?\.mp4[^\s"'<>]*/i)?.[0] ?? null);
-  if (anyMp4 && isLikelyIgCdn(anyMp4)) return { kind: "video", url: anyMp4 };
 
   return null;
 }
@@ -1448,17 +1498,15 @@ async function tryFetchInstagramJson(canonical: string): Promise<InstagramMedia 
   const url = `${canonical}?__a=1&__d=dis`;
   const headers: Record<string, string> = {
     ...SOCIAL_HEADERS,
-    accept: "application/json",
+    "Accept": "application/json",
     "x-ig-app-id": IG_APP_ID,
     "x-requested-with": "XMLHttpRequest",
-    referer: canonical,
-    origin: "https://www.instagram.com",
+    "Referer": canonical,
+    "Origin": "https://www.instagram.com",
   };
 
   const res = await fetch(url, { method: "GET", headers });
   if (!res.ok) return null;
-
-  // Sometimes Instagram returns JSON with wrong content-type; be tolerant.
   const body = await res.text().catch(() => "");
   if (!body) return null;
 
@@ -1469,12 +1517,10 @@ async function tryFetchInstagramJson(canonical: string): Promise<InstagramMedia 
     return null;
   }
 
-  // Old-ish shape: graphql.shortcode_media
   const node = data?.graphql?.shortcode_media;
   const fromGraphql = pickInstagramFromGraphql(node);
   if (fromGraphql) return fromGraphql;
 
-  // Some shapes: items[0]
   const item = Array.isArray(data?.items) ? data.items[0] : null;
   if (item) {
     const videoUrl =
@@ -1489,39 +1535,27 @@ async function tryFetchInstagramJson(canonical: string): Promise<InstagramMedia 
       "";
     if (imgUrl) return { kind: "photo", url: imgUrl };
   }
-
   return null;
 }
 
 async function tryFetchInstagramEmbed(canonical: string): Promise<InstagramMedia | null> {
-  // captioned/ tends to include richer data across post types
   const urls = [`${canonical}embed/captioned/`, `${canonical}embed/`, canonical];
-
   for (const url of urls) {
     const res = await fetch(url, {
       method: "GET",
-      headers: {
-        ...SOCIAL_HEADERS,
-        referer: canonical,
-        origin: "https://www.instagram.com",
-      },
+      headers: { ...SOCIAL_HEADERS, "Referer": canonical, "Origin": "https://www.instagram.com" },
     });
     if (!res.ok) continue;
-
     const html = await res.text().catch(() => "");
     if (!html) continue;
-
     const extracted = extractInstagramFromHtml(html);
     if (extracted) return extracted;
   }
-
   return null;
 }
 
-
-async function handleInstagramPublicDownload(tg: Telegram, chatId: number, targetUrl: string, origin: string, replyTo?: number) {
+async function handleInstagramPublicDownload(tg: Telegram, chatId: number, targetUrl: string, replyTo?: number) {
   await tg.sendChatAction(chatId, "upload_video");
-
   const info = parseInstagramShortcode(targetUrl);
   if (!info) {
     await tg.sendMessage(chatId, "❌ لینک اینستاگرام قابل تشخیص نبود.", { replyTo });
@@ -1529,45 +1563,91 @@ async function handleInstagramPublicDownload(tg: Telegram, chatId: number, targe
   }
 
   const canonical = `https://www.instagram.com/${info.type}/${info.shortcode}/`;
-
-  // Try JSON first (fast when it works)
   const jsonMedia = await tryFetchInstagramJson(canonical);
   const media = jsonMedia || (await tryFetchInstagramEmbed(canonical));
 
   if (!media) {
-    await tg.sendMessage(
-      chatId,
-      "❌ نتونستم مدیای اینستاگرام رو استخراج کنم. احتمالاً پست خصوصی/محدود شده یا اینستاگرام برای این لینک لاگین می‌خواد.",
-      { replyTo },
-    );
+    await tg.sendMessage(chatId, "❌ نتونستم مدیای اینستاگرام رو استخراج کنم. احتمالاً پست خصوصی است.", { replyTo });
     return;
   }
 
   const caption = escapeHtml(canonical);
-
   if (media.kind === "video") {
-    const sent = await tg.sendVideo(chatId, buildProxyUrl(origin, media.url), caption, replyTo);
-    if (!sent) {
-      const proxy = buildProxyUrl(origin, media.url);
-      const sentDoc = await tg.sendDocument(chatId, proxy, caption, replyTo);
-      if (!sentDoc) {
-        await tg.sendMessage(chatId, `✅ لینک ویدیو:\n${escapeHtml(media.url)}`, { replyTo });
-      }
-    }
+    const sent = await tg.sendVideo(chatId, media.url, caption, replyTo);
+    if (!sent) await tg.sendMessage(chatId, `✅ لینک ویدیو:\n${escapeHtml(media.url)}`, { replyTo });
     return;
   }
-
-  await tg.sendPhoto(chatId, buildProxyUrl(origin, media.url), caption, replyTo);
+  await tg.sendPhoto(chatId, media.url, caption, replyTo);
 }
 
+async function handleCobalt(tg: Telegram, chatId: number, targetUrl: string, replyTo?: number) {
+  await tg.sendChatAction(chatId, "upload_video");
+  const now = Date.now();
+  pruneCobaltState(now);
+  const isTw = isTwitterTarget(targetUrl);
+  const timeoutMs = isTw ? COBALT_TIMEOUT_MS_TW : COBALT_TIMEOUT_MS;
+  const baseDelay = isTw ? COBALT_BACKOFF_BASE_MS_TW : COBALT_BACKOFF_BASE_MS;
+  const bases = sortCobaltBases([...COBALT_INSTANCES], now);
 
-async function handleCallback(update: any, env: Env, ctx: ExecutionContext, tg: Telegram) {
+  const endpointsForBase = (baseUrl: string) => [baseUrl.replace(/\/+$/, ""), `${baseUrl.replace(/\/+$/, "")}/api/json`];
+  let attempt = 0;
+
+  for (const baseUrl of bases) {
+    const s = getCobaltState(baseUrl, Date.now());
+    const endpoints = endpointsForBase(baseUrl);
+
+    for (const endpoint of endpoints) {
+      const now2 = Date.now();
+      if (attempt > 0) {
+        const jitter = Math.floor(Math.random() * 180);
+        const step = Math.min(COBALT_BACKOFF_MAX_MS, baseDelay * attempt);
+        const extra = Math.min(800, (s.failCount || 0) * 20);
+        await sleep(step + jitter + extra);
+      }
+      attempt++;
+
+      const body = JSON.stringify({ url: targetUrl, vCodec: "h264" });
+      const { res, timeout } = await fetchWithTimeout(endpoint, { method: "POST", headers: COBALT_REQ_HEADERS, body }, timeoutMs);
+
+      if (!res) {
+        markCobaltFail(baseUrl, Date.now(), { timeout: true });
+        continue;
+      }
+      if (!res.ok) {
+        markCobaltFail(baseUrl, Date.now(), { status: res.status });
+        continue;
+      }
+
+      let data: any = null;
+      try {
+        data = await res.json<any>();
+      } catch {
+        markCobaltFail(baseUrl, Date.now(), { status: 0 });
+        continue;
+      }
+
+      try {
+        await processCobaltResponse(tg, chatId, data, targetUrl, replyTo);
+        markCobaltOk(baseUrl, Date.now());
+        return true;
+      } catch (e: any) {
+        const st = typeof (data as any)?.statusCode === "number" ? (data as any).statusCode : undefined;
+        markCobaltFail(baseUrl, Date.now(), { status: st ?? 0, timeout: false });
+        continue;
+      }
+    }
+  }
+
+  await tg.sendMessage(chatId, `❌ سرورهای دانلود پاسخگو نیستند.`, { replyTo });
+  return true;
+}
+
+async function handleCallback(update: TgUpdate, env: Env, ctx: ExecutionContext, tg: Telegram) {
   const cb = update?.callback_query;
   if (!cb) return;
-
   const data: string = cb.data || "";
-  const chatId: number | undefined = cb.message?.chat?.id;
-  const messageId: number | undefined = cb.message?.message_id;
+  const chatId = cb.message?.chat?.id;
+  const messageId = cb.message?.message_id;
 
   if (data.startsWith("cat:")) await tg.answerCallbackQuery(cb.id, "در حال دریافت قیمت‌ها...");
   else if (data.startsWith("show:")) await tg.answerCallbackQuery(cb.id, "📩 ارسال شد");
@@ -1579,31 +1659,16 @@ async function handleCallback(update: any, env: Env, ctx: ExecutionContext, tg: 
     await tg.editMessageText(chatId, messageId, getHelpMessage(), HELP_KEYBOARD);
     return;
   }
-
   if (data === "start_menu") {
     await tg.editMessageText(chatId, messageId, "👋 سلام! به ربات خوش آمدید.\nچه کاری می‌توانم برایتان انجام دهم؟", START_KEYBOARD);
     return;
   }
-
   if (data === "noop") return;
 
-  if (data.startsWith("cat:")) {
-    const category = data.split(":")[1] as PriceCategory;
-    const stored = await getStoredOrRefresh(env, ctx);
-    const items = buildPriceItems(stored, category);
-    const totalPages = Math.max(1, Math.ceil(items.length / PRICE_PAGE_SIZE));
-    const page = 0;
-    const timeStr = getUpdateTimeStr(stored);
-    const text = buildCategoryHeaderText(category, page, totalPages, timeStr);
-    const kb = buildPricesKeyboard(category, page, totalPages, items);
-    await tg.editMessageText(chatId, messageId, text, kb);
-    return;
-  }
-
-  if (data.startsWith("page:")) {
+  if (data.startsWith("cat:") || data.startsWith("page:")) {
     const parts = data.split(":");
     const category = parts[1] as PriceCategory;
-    const pageReq = parseInt(parts[2] || "0", 10) || 0;
+    const pageReq = parts[0] === "page" ? (parseInt(parts[2] || "0", 10) || 0) : 0;
     const stored = await getStoredOrRefresh(env, ctx);
     const items = buildPriceItems(stored, category);
     const totalPages = Math.max(1, Math.ceil(items.length / PRICE_PAGE_SIZE));
@@ -1624,21 +1689,16 @@ async function handleCallback(update: any, env: Env, ctx: ExecutionContext, tg: 
     await tg.sendMessage(chatId, text);
     return;
   }
-
-  if (data === "get_all_prices") {
-    await tg.editMessageText(chatId, messageId, "📌 یک دسته‌بندی را انتخاب کنید:", START_KEYBOARD);
-    return;
-  }
 }
 
-async function handleMessage(update: any, env: Env, ctx: ExecutionContext, tg: Telegram, origin: string) {
+async function handleMessage(update: TgUpdate, env: Env, ctx: ExecutionContext, tg: Telegram) {
   const msg = update?.message;
   if (!msg) return;
 
-  const chatId: number | undefined = msg?.chat?.id;
-  const text: string | undefined = msg?.text;
-  const messageId: number | undefined = msg?.message_id;
-  const userId: number | undefined = msg?.from?.id;
+  const chatId = msg.chat?.id;
+  const text = msg.text;
+  const messageId = msg.message_id;
+  const userId = msg.from?.id;
 
   if (!chatId || !text || !userId) return;
 
@@ -1646,29 +1706,26 @@ async function handleMessage(update: any, env: Env, ctx: ExecutionContext, tg: T
   const nowSec = Math.floor(Date.now() / 1000);
   if (nowSec - msgDate > 40) return;
 
-  const isGroup = msg?.chat?.type === "group" || msg?.chat?.type === "supergroup";
+  const isGroup = msg.chat.type === "group" || msg.chat.type === "supergroup";
   const replyTo = isGroup ? messageId : undefined;
-
   const now = Date.now();
-  pruneCooldownMem(now);
 
-  const memExp = cooldownMem.get(userId);
-  if (memExp && memExp > now) return;
+  // Cooldown check (Memory then KV)
+  pruneCooldownMem(now);
+  if (cooldownMem.get(userId)! > now) return;
 
   const cooldownKey = `cooldown:${userId}`;
   const inCooldown = await env.BOT_KV.get(cooldownKey);
-
   if (inCooldown) {
     cooldownMem.set(userId, now + COOLDOWN_TTL_MS);
     return;
   }
-
   cooldownMem.set(userId, now + COOLDOWN_TTL_MS);
   ctx.waitUntil(env.BOT_KV.put(cooldownKey, "1", { expirationTtl: Math.ceil(COOLDOWN_TTL_MS / 1000) }));
 
-  const downloadUrl = pickSocialUrl(text);
+  const downloadUrl = pickCobaltUrl(text);
   if (downloadUrl) {
-    await handlePublicDownload(tg, chatId, downloadUrl, origin, replyTo);
+    await handleCobalt(tg, chatId, downloadUrl, replyTo);
     return;
   }
 
@@ -1676,21 +1733,15 @@ async function handleMessage(update: any, env: Env, ctx: ExecutionContext, tg: T
   const cmd = normalizeCommand(textNorm);
 
   if (cmd === "/start") {
-    await tg.sendMessage(
-      chatId,
-      "👋 سلام! به ربات [ارز چی؟] خوش آمدید.\n\nمن می‌توانم قیمت ارزها و کریپتو را بگویم و ویدیوهای اینستاگرام/توییتر را دانلود کنم.",
-      { replyTo, replyMarkup: START_KEYBOARD },
-    );
+    await tg.sendMessage(chatId, "👋 سلام! به ربات [ارز چی؟] خوش آمدید.\n\nمن می‌توانم قیمت ارزها و کریپتو را بگویم و ویدیوهای اینستاگرام/توییتر را دانلود کنم.", { replyTo, replyMarkup: START_KEYBOARD });
     return;
   }
-
   if (cmd === "/help") {
     await tg.sendMessage(chatId, getHelpMessage(), { replyTo, replyMarkup: HELP_KEYBOARD });
     return;
   }
-
   if (cmd === "/refresh") {
-    const parts = stripPunct(textNorm).split(/\s+/).filter(Boolean);
+    const parts = stripPunct(textNorm).split(RE_SPACES).filter(Boolean);
     const key = parts[1] || "";
     if (!env.ADMIN_KEY || key !== env.ADMIN_KEY) return;
     const r = await refreshRates(env);
@@ -1699,7 +1750,6 @@ async function handleMessage(update: any, env: Env, ctx: ExecutionContext, tg: T
   }
 
   const stored = await getStoredOrRefresh(env, ctx);
-
   if (cmd === "/all") {
     const out = buildAll(stored);
     const chunks = chunkText(out, 3800);
@@ -1712,7 +1762,6 @@ async function handleMessage(update: any, env: Env, ctx: ExecutionContext, tg: T
 
   const code = parsed.code;
   const amount = parsed.amount;
-
   const r = stored.rates[code];
   if (!r) return;
 
@@ -1727,48 +1776,36 @@ export default {
 
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
-
     if (url.pathname === "/health") return new Response("ok");
-
-    if (url.pathname === "/proxy") {
-      return handleProxy(req);
-    }
 
     if (url.pathname === "/refresh") {
       const key = url.searchParams.get("key") || "";
       if (!env.ADMIN_KEY || key !== env.ADMIN_KEY) return new Response("Unauthorized", { status: 401 });
       try {
         const r = await refreshRates(env);
-        return new Response(JSON.stringify(r), { headers: { "content-type": "application/json" } });
+        return new Response(JSON.stringify(r), { headers: JSON_HEADERS });
       } catch (e: any) {
-        return new Response(JSON.stringify({ ok: false, error: String(e?.message ?? e) }), {
-          headers: { "content-type": "application/json" },
-          status: 502,
-        });
+        return new Response(JSON.stringify({ ok: false, error: String(e?.message ?? e) }), { headers: JSON_HEADERS, status: 502 });
       }
     }
 
     if (url.pathname !== "/telegram" || req.method !== "POST") return new Response("Not Found", { status: 404 });
-
     const got = req.headers.get("X-Telegram-Bot-Api-Secret-Token") || "";
     if (got !== env.TG_SECRET) return new Response("Unauthorized", { status: 401 });
 
-    const update = await req.json<any>().catch(() => null);
-    if (!update) return new Response("ok");
-    if (update?.edited_message) return new Response("ok");
+    const update = await req.json<TgUpdate>().catch(() => null);
+    if (!update || update.edited_message) return new Response("ok");
 
     const tg = new Telegram(env.TG_TOKEN);
-
-    if (update?.callback_query) {
+    if (update.callback_query) {
       ctx.waitUntil(handleCallback(update, env, ctx, tg).catch(() => {}));
       return new Response("ok");
     }
-
-    if (update?.message) {
-      ctx.waitUntil(handleMessage(update, env, ctx, tg, url.origin).catch(() => {}));
+    if (update.message) {
+      ctx.waitUntil(handleMessage(update, env, ctx, tg).catch(() => {}));
       return new Response("ok");
     }
-
     return new Response("ok");
   },
 };
+<end_of_user_uploaded_file: x-ok.txt>
