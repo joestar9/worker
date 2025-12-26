@@ -9,20 +9,6 @@ const BOT_USERNAME = "worker093578bot";
 const PRICES_JSON_URL =
   "https://raw.githubusercontent.com/joestar9/price-scraper/refs/heads/main/merged_prices.json";
 
-const COBALT_INSTANCES = [
-  "https://cobalt-api.meowing.de",
-  "https://cobalt-backend.canine.tools",
-  "https://capi.3kh0.net",
-  "https://cobalt-api.kwiatekmiki.com",
-  "https://downloadapi.stuff.solutions",
-  "https://cobalt.canine.tools",
-  "https://api.cobalt.tools",
-  "https://blossom.imput.net",
-  "https://kityune.imput.net",
-  "https://nachos.imput.net",
-  "https://nuko-c.meowing.de",
-  "https://sunny.imput.net",
-];
 
 const KEY_RATES = "rates:v2:latest";
 const KEY_HASH = "rates:v2:hash";
@@ -41,17 +27,6 @@ const COOLDOWN_MEM_MAX = 20_000;
 
 const MAX_MEDIA_CAPTION_LEN = 950;
 
-const COBALT_TIMEOUT_MS = 12_000;
-const COBALT_TIMEOUT_MS_TW = 14_000;
-const COBALT_BACKOFF_BASE_MS = 220;
-const COBALT_BACKOFF_BASE_MS_TW = 320;
-const COBALT_BACKOFF_MAX_MS = 2400;
-const COBALT_COOLDOWN_429_MS = 20 * 60_000;
-const COBALT_COOLDOWN_403_MS = 25 * 60_000;
-const COBALT_COOLDOWN_5XX_MS = 5 * 60_000;
-const COBALT_COOLDOWN_TIMEOUT_MS = 6 * 60_000;
-const COBALT_COOLDOWN_OTHER_MS = 3 * 60_000;
-const COBALT_STATE_TTL_MS = 2 * 60 * 60_000;
 
 const TG_JSON_HEADERS = { "content-type": "application/json" } as const;
 const UA_HEADERS = { "User-Agent": "Mozilla/5.0" } as const;
@@ -85,8 +60,6 @@ let memStoredReadAt = 0;
 
 const cooldownMem = new Map<number, number>();
 
-type CobaltState = { failCount: number; cooldownUntil: number; lastOkAt: number; lastSeenAt: number };
-const cobaltState = new Map<string, CobaltState>();
 
 const META: Record<string, { emoji: string; fa: string }> = {
   usd: { emoji: "🇺🇸", fa: "دلار آمریکا" },
@@ -1047,15 +1020,8 @@ function getHelpMessage() {
 🔸 نرخ تتر/دلار از بازار آزاد گرفته می‌شود.`;
 }
 
-const COBALT_HEADERS: Record<string, string> = {
-  Accept: "application/json",
-  "Content-Type": "application/json",
-  "User-Agent": "Mozilla/5.0 (compatible; TelegramBot/1.0)",
-  Origin: "https://cobalt.tools",
-  Referer: "https://cobalt.tools/",
-};
 
-function pickCobaltUrl(text: string): string | null {
+function pickDownloadUrl(text: string): string | null {
   const m = text.match(/https?:\/\/[^\s<>()]+/i);
   if (!m) return null;
   const raw = m[0].replace(/[)\]}>,.!?؟؛:]+$/g, "");
@@ -1089,153 +1055,6 @@ function isTwitterTarget(urlStr: string) {
   }
 }
 
-function extractCobaltCaption(data: any): string | null {
-  const candidates: unknown[] = [
-    data?.caption,
-    data?.description,
-    data?.title,
-    data?.meta?.caption,
-    data?.meta?.description,
-    data?.meta?.title,
-    data?.metadata?.caption,
-    data?.metadata?.description,
-    data?.metadata?.title,
-    data?.post?.caption,
-    data?.post?.text,
-    data?.tweet?.full_text,
-    data?.tweet?.fullText,
-    data?.tweet?.text,
-    data?.statusText,
-  ];
-  for (const c of candidates) {
-    if (typeof c === "string") {
-      const t = cleanText(c);
-      if (t) return t;
-    }
-  }
-  return null;
-}
-
-function buildCobaltCaption(sourceUrl: string, captionText: string | null) {
-  const linkPart = `🔗 <a href="${escapeAttr(sourceUrl)}">منبع</a>`;
-  const cap = captionText ? escapeHtml(cleanText(captionText)) : "";
-  const out = cap ? `${cap}\n\n${linkPart}` : linkPart;
-  return truncate(out, MAX_MEDIA_CAPTION_LEN);
-}
-
-async function processCobaltResponse(tg: Telegram, chatId: number, data: any, sourceUrl: string, replyTo?: number) {
-  if (data?.status === "error") throw new Error(data.text || "Cobalt Error");
-
-  const overallCaptionRaw = extractCobaltCaption(data);
-
-  if (data?.status === "stream" || data?.status === "redirect") {
-    const cap = buildCobaltCaption(sourceUrl, overallCaptionRaw);
-    await tg.sendVideo(chatId, data.url, cap, replyTo);
-    return;
-  }
-
-  if (data?.status === "picker" && Array.isArray(data.picker) && data.picker.length > 0) {
-    const items = data.picker.slice(0, 4);
-    for (const item of items) {
-      const itemCapRaw =
-        (typeof item?.caption === "string" && cleanText(item.caption)) ||
-        (typeof item?.description === "string" && cleanText(item.description)) ||
-        (typeof item?.title === "string" && cleanText(item.title)) ||
-        null;
-
-      const cap = buildCobaltCaption(sourceUrl, itemCapRaw ?? overallCaptionRaw);
-
-      if (item?.type === "video") await tg.sendVideo(chatId, item.url, cap, replyTo);
-      else if (item?.type === "photo") await tg.sendPhoto(chatId, item.url, cap, replyTo);
-    }
-    return;
-  }
-
-  throw new Error("Unknown response");
-}
-
-function sleep(ms: number) {
-  return new Promise<void>((resolve) => setTimeout(resolve, ms));
-}
-
-function pruneCobaltState(now: number) {
-  for (const [k, v] of cobaltState) {
-    if (now - v.lastSeenAt > COBALT_STATE_TTL_MS) cobaltState.delete(k);
-  }
-}
-
-function getCobaltState(key: string, now: number): CobaltState {
-  const prev = cobaltState.get(key);
-  if (prev) {
-    prev.lastSeenAt = now;
-    return prev;
-  }
-  const s: CobaltState = { failCount: 0, cooldownUntil: 0, lastOkAt: 0, lastSeenAt: now };
-  cobaltState.set(key, s);
-  return s;
-}
-
-function markCobaltOk(baseUrl: string, now: number) {
-  const s = getCobaltState(baseUrl, now);
-  s.failCount = 0;
-  s.cooldownUntil = 0;
-  s.lastOkAt = now;
-}
-
-function markCobaltFail(baseUrl: string, now: number, info: { status?: number; timeout?: boolean }) {
-  const s = getCobaltState(baseUrl, now);
-  s.failCount = Math.min(50, (s.failCount || 0) + 1);
-  const st = info.status ?? 0;
-  let cd = COBALT_COOLDOWN_OTHER_MS;
-  if (info.timeout) cd = COBALT_COOLDOWN_TIMEOUT_MS;
-  else if (st === 429) cd = COBALT_COOLDOWN_429_MS;
-  else if (st === 403) cd = COBALT_COOLDOWN_403_MS;
-  else if (st >= 500) cd = COBALT_COOLDOWN_5XX_MS;
-  else if (st === 0) cd = COBALT_COOLDOWN_TIMEOUT_MS;
-  s.cooldownUntil = Math.max(s.cooldownUntil || 0, now + cd);
-}
-
-function sortCobaltBases(bases: string[], now: number) {
-  const scored = bases.map((b) => {
-    const s = cobaltState.get(b);
-    const fail = s?.failCount ?? 0;
-    const cool = s?.cooldownUntil ?? 0;
-    const okAt = s?.lastOkAt ?? 0;
-    const inCool = cool > now;
-    const score = (inCool ? 10_000 : 0) + fail * 50 - okAt / 1e12;
-    return { b, score, inCool };
-  });
-  scored.sort((x, y) => x.score - y.score);
-  const available = scored.filter((x) => !x.inCool).map((x) => x.b);
-  const cooled = scored.filter((x) => x.inCool).map((x) => x.b);
-  return [...available, ...cooled];
-}
-
-async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number) {
-  const ac = new AbortController();
-  const t = setTimeout(() => ac.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, { ...init, signal: ac.signal });
-    clearTimeout(t);
-    return { res, timeout: false as const };
-  } catch (e) {
-    clearTimeout(t);
-    const msg = String((e as any)?.name ?? "") + ":" + String((e as any)?.message ?? e);
-    const isTimeout = msg.toLowerCase().includes("abort") || msg.toLowerCase().includes("timeout");
-    return { res: null as Response | null, timeout: isTimeout as const };
-  }
-}
-
-
-// ============================
-// Public, free download helpers (no Cobalt / no API keys)
-// Notes: Works only for PUBLIC posts. If the platform requires login for a specific URL,
-// we cannot fetch the media URL without user-provided auth.
-// ============================
-
-const SOCIAL_UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
-
 const SOCIAL_HEADERS: Record<string, string> = {
   "user-agent": SOCIAL_UA,
   accept: "text/html,application/json;q=0.9,*/*;q=0.8",
@@ -1258,7 +1077,7 @@ async function handlePublicDownload(tg: Telegram, chatId: number, targetUrl: str
     return;
   }
   if (isInstagramTarget(targetUrl)) {
-    await handleCobalt(tg, chatId, targetUrl, replyTo);
+    await handleInstagramPublicDownload(tg, chatId, targetUrl, replyTo);
     return;
   }
   await tg.sendMessage(chatId, "❌ این لینک پشتیبانی نمی‌شود.", { replyTo });
@@ -1632,8 +1451,8 @@ async function tryFetchInstagramEmbed(canonical: string): Promise<InstagramMedia
 
 
 async function handleInstagramPublicDownload(tg: Telegram, chatId: number, targetUrl: string, replyTo?: number) {
-  await tg.sendChatAction(chatId, "upload_video");
-
+  // روش “Link Expander”: لینک اینستاگرام رو به دامنه‌های embed-friendly تبدیل می‌کنیم
+  // تا تلگرام بتونه preview/inline video رو درست نشون بده (بدون اسکرپ مستقیم اینستاگرام).
   const info = parseInstagramShortcode(targetUrl);
   if (!info) {
     await tg.sendMessage(chatId, "❌ لینک اینستاگرام قابل تشخیص نبود.", { replyTo });
@@ -1641,108 +1460,14 @@ async function handleInstagramPublicDownload(tg: Telegram, chatId: number, targe
   }
 
   const canonical = `https://www.instagram.com/${info.type}/${info.shortcode}/`;
+  const primary = `https://www.kkinstagram.com/${info.type}/${info.shortcode}/`;
+  const fallback = `https://ddinstagram.com/${info.type}/${info.shortcode}/`;
 
-  // Try JSON first (fast when it works)
-  const jsonMedia = await tryFetchInstagramJson(canonical);
-  const media = jsonMedia || (await tryFetchInstagramEmbed(canonical));
-
-  if (!media) {
-    await tg.sendMessage(
-      chatId,
-      "❌ نتونستم مدیای اینستاگرام رو استخراج کنم. احتمالاً پست خصوصی/محدود شده یا اینستاگرام برای این لینک لاگین می‌خواد.",
-      { replyTo },
-    );
-    return;
-  }
-
-  const caption = escapeHtml(canonical);
-
-  if (media.kind === "video") {
-    const sent = await tg.sendVideo(chatId, media.url, caption, replyTo);
-    if (!sent) {
-      await tg.sendMessage(chatId, `✅ لینک ویدیو:\n${escapeHtml(media.url)}`, { replyTo });
-    }
-    return;
-  }
-
-  await tg.sendPhoto(chatId, media.url, caption, replyTo);
-}
-
-
-async function handleCobalt(tg: Telegram, chatId: number, targetUrl: string, replyTo?: number) {
-  await tg.sendChatAction(chatId, "upload_video");
-
-  const now = Date.now();
-  pruneCobaltState(now);
-
-  const isTw = isTwitterTarget(targetUrl);
-  const timeoutMs = isTw ? COBALT_TIMEOUT_MS_TW : COBALT_TIMEOUT_MS;
-  const baseDelay = isTw ? COBALT_BACKOFF_BASE_MS_TW : COBALT_BACKOFF_BASE_MS;
-
-  const bases = sortCobaltBases([...COBALT_INSTANCES], now);
-
-  const endpointsForBase = (baseUrl: string) => {
-    const base = baseUrl.replace(/\/+$/, "");
-    return [base];
-  };
-
-  let attempt = 0;
-
-  for (const baseUrl of bases) {
-    const s = getCobaltState(baseUrl, Date.now());
-    const endpoints = endpointsForBase(baseUrl);
-
-    for (const endpoint of endpoints) {
-      const now2 = Date.now();
-      if (attempt > 0) {
-        const jitter = Math.floor(Math.random() * 180);
-        const step = Math.min(COBALT_BACKOFF_MAX_MS, baseDelay * attempt);
-        const extra = Math.min(800, (s.failCount || 0) * 20);
-        await sleep(step + jitter + extra);
-      }
-      attempt++;
-
-      const body = JSON.stringify({ url: targetUrl, vCodec: "h264" });
-
-      const { res, timeout } = await fetchWithTimeout(
-        endpoint,
-        { method: "POST", headers: COBALT_HEADERS, body },
-        timeoutMs,
-      );
-
-      if (!res) {
-        markCobaltFail(baseUrl, Date.now(), { timeout: true });
-        continue;
-      }
-
-      if (!res.ok) {
-        markCobaltFail(baseUrl, Date.now(), { status: res.status });
-        continue;
-      }
-
-      let data: any = null;
-      try {
-        data = await res.json<any>();
-      } catch {
-        markCobaltFail(baseUrl, Date.now(), { status: 0 });
-        continue;
-      }
-
-      try {
-        await processCobaltResponse(tg, chatId, data, targetUrl, replyTo);
-        markCobaltOk(baseUrl, Date.now());
-        return true;
-      } catch (e: any) {
-        const st = typeof (data as any)?.statusCode === "number" ? (data as any).statusCode : undefined;
-        markCobaltFail(baseUrl, Date.now(), { status: st ?? 0, timeout: false });
-        void e;
-        continue;
-      }
-    }
-  }
-
-  await tg.sendMessage(chatId, `❌ سرورهای دانلود پاسخگو نیستند. لطفاً دقایقی دیگر تلاش کنید.`, { replyTo });
-  return true;
+  await tg.sendMessage(
+    chatId,
+    `✅ لینک قابل نمایش/دانلود در تلگرام:\n${primary}\n\nاگر نمایش نداد:\n${fallback}\n\n(لینک اصلی: ${canonical})`,
+    { replyTo },
+  );
 }
 
 async function handleCallback(update: any, env: Env, ctx: ExecutionContext, tg: Telegram) {
@@ -1850,7 +1575,7 @@ async function handleMessage(update: any, env: Env, ctx: ExecutionContext, tg: T
   cooldownMem.set(userId, now + COOLDOWN_TTL_MS);
   ctx.waitUntil(env.BOT_KV.put(cooldownKey, "1", { expirationTtl: Math.ceil(COOLDOWN_TTL_MS / 1000) }));
 
-  const downloadUrl = pickCobaltUrl(text);
+  const downloadUrl = pickDownloadUrl(text);
   if (downloadUrl) {
     await handlePublicDownload(tg, chatId, downloadUrl, replyTo);
     return;
