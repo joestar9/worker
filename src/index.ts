@@ -1089,6 +1089,217 @@ function isTwitterTarget(urlStr: string) {
   }
 }
 
+function isInstagramTarget(urlStr: string) {
+  try {
+    const u = new URL(urlStr);
+    const h = u.hostname.toLowerCase();
+    if (!(h === "instagram.com" || h.endsWith(".instagram.com"))) return false;
+    // فقط پست/ریل/TV
+    const p = u.pathname.toLowerCase();
+    return p.includes("/p/") || p.includes("/reel/") || p.includes("/tv/");
+  } catch {
+    return false;
+  }
+}
+
+type InstagramResolved = { kind: "video" | "photo"; url: string; all?: string[]; sourceUrl: string };
+
+const IG_PAGE_HEADERS: Record<string, string> = {
+  // UA و هدرهای سبک مرورگر برای این‌که IG کمتر "login wall" بده
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
+  Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+  "Accept-Language": "en-US,en;q=0.9",
+};
+
+const IG_MEDIA_HEADERS: Record<string, string> = {
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
+  Accept: "*/*",
+  Referer: "https://www.instagram.com/",
+  Origin: "https://www.instagram.com",
+};
+
+function canonicalizeInstagramUrl(input: string) {
+  try {
+    const u = new URL(input);
+    const keep = new URL(u.origin + u.pathname);
+    if (!keep.pathname.endsWith("/")) keep.pathname += "/";
+    return keep.toString();
+  } catch {
+    return input;
+  }
+}
+
+function extractInstagramCode(input: string): { type: "p" | "reel" | "tv"; code: string } | null {
+  try {
+    const u = new URL(input);
+    const parts = u.pathname.split("/").filter(Boolean);
+    const idx = parts.findIndex((x) => x === "p" || x === "reel" || x === "tv");
+    if (idx === -1) return null;
+    const type = parts[idx] as "p" | "reel" | "tv";
+    const code = parts[idx + 1] || "";
+    if (!code) return null;
+    return { type, code };
+  } catch {
+    return null;
+  }
+}
+
+function decodeHtml(s: string) {
+  // برای og:video / og:image معمولاً همین کافیست
+  return s.replaceAll("&amp;", "&").replaceAll("&#x2F;", "/").replaceAll("&quot;", '"');
+}
+
+function uniq(arr: string[]) {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const x of arr) {
+    const k = x.trim();
+    if (!k || seen.has(k)) continue;
+    seen.add(k);
+    out.push(k);
+  }
+  return out;
+}
+
+function extractMetaContent(html: string, keys: string[]) {
+  for (const k of keys) {
+    const tagRe = new RegExp(
+      `<meta[^>]*?(?:property|name)=["']${k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["'][^>]*?>`,
+      "i",
+    );
+    const tag = html.match(tagRe)?.[0] || "";
+    if (!tag) continue;
+    const m = tag.match(/content=["']([^"']+)["']/i);
+    if (m?.[1]) return decodeHtml(m[1]);
+  }
+  return null;
+}
+
+function findUrlsByExt(html: string, ext: "mp4" | "jpg" | "jpeg" | "png" | "webp") {
+  // این regex هم URLهای معمولی (https://) و هم URLهای escape شده (https:\/\/) را می‌گیرد
+  const re = new RegExp(`https?:[^"'\\s<>\\\\]+\\.${ext}[^"'\\s<>\\\\]*`, "gi");
+  const m = html.match(re) || [];
+  return uniq(m.map((x) => decodeHtml(x.replaceAll("\\/", "/"))));
+}
+
+function pickBestUrl(urls: string[]) {
+  if (!urls.length) return null;
+  let best = urls[0];
+  for (const u of urls) if (u.length > best.length) best = u;
+  return best;
+}
+
+async function resolveInstagramPublicMedia(inputUrl: string): Promise<InstagramResolved | null> {
+  const clean = canonicalizeInstagramUrl(inputUrl);
+  const info = extractInstagramCode(clean);
+  if (!info) return null;
+
+  const { type, code } = info;
+
+  const candidates: string[] = [
+    `https://www.instagram.com/${type}/${code}/embed/captioned/`,
+    `https://www.instagram.com/${type}/${code}/embed/`,
+    `https://www.instagram.com/${type}/${code}/`,
+    // fallbackهای رایگان (پراکسی embed) — ممکن است flaky باشند
+    `https://www.ddinstagram.com/${type}/${code}/?direct=true`,
+    `https://www.kkinstagram.com/${type}/${code}/`,
+  ];
+
+  for (const pageUrl of candidates) {
+    const { res } = await fetchWithTimeout(
+      pageUrl,
+      { method: "GET", headers: IG_PAGE_HEADERS, redirect: "follow" },
+      9000,
+    );
+
+    if (!res || !res.ok) continue;
+
+    const ctype = (res.headers.get("content-type") || "").toLowerCase();
+    if (!ctype.includes("text/html")) continue;
+
+    const html = await res.text().catch(() => "");
+    if (!html) continue;
+
+    // 1) meta tags
+    const ogVideo =
+      extractMetaContent(html, ["og:video:secure_url", "og:video", "twitter:player:stream"]) || null;
+    const ogVideoUrl = ogVideo && ogVideo.startsWith("http") ? ogVideo : null;
+
+    const ogImage = extractMetaContent(html, ["og:image:secure_url", "og:image"]) || null;
+
+    // 2) regex مستقیم برای mp4/jpg داخل HTML
+    const mp4s = uniq([...(ogVideoUrl ? [ogVideoUrl] : []), ...findUrlsByExt(html, "mp4")]);
+    const imgs = uniq([
+      ...(ogImage ? [ogImage] : []),
+      ...findUrlsByExt(html, "jpg"),
+      ...findUrlsByExt(html, "jpeg"),
+      ...findUrlsByExt(html, "png"),
+      ...findUrlsByExt(html, "webp"),
+    ]);
+
+    const bestMp4 = pickBestUrl(mp4s);
+    if (bestMp4) return { kind: "video", url: bestMp4, all: mp4s, sourceUrl: clean };
+
+    const bestImg = pickBestUrl(imgs);
+    if (bestImg) return { kind: "photo", url: bestImg, all: imgs, sourceUrl: clean };
+  }
+
+  return null;
+}
+
+async function handleInstagramPublic(
+  tg: Telegram,
+  chatId: number,
+  url: string,
+  replyTo: number | undefined,
+  origin: string,
+  env: Env,
+) {
+  await tg.sendChatAction(chatId, "upload_video");
+
+  const resolved = await resolveInstagramPublicMedia(url);
+  if (!resolved) {
+    await tg.sendMessage(
+      chatId,
+      "⛔️ از این لینک اینستاگرام نتونستم فایل مدیا رو استخراج کنم. (گاهی اینستاگرام بدون لاگین/روی IPهای دیتاسنتر لینک مستقیم نمی‌دهد.)",
+      { replyTo },
+    );
+    return;
+  }
+
+  // خیلی وقت‌ها تلگرام نمی‌تونه مستقیم از CDN اینستاگرام دانلود کنه (403)؛
+  // پس از پراکسی خود Worker استفاده می‌کنیم.
+  const proxied = await makeProxyUrl(origin, env, resolved.url, 10 * 60).catch(() => null);
+  const sendUrl = proxied || resolved.url;
+
+  const caption = `✅ دانلود از اینستاگرام\n<a href="${escapeHtml(resolved.sourceUrl)}">لینک اصلی</a>`;
+
+  if (resolved.kind === "video") {
+    const ok = await tg.sendVideo(chatId, sendUrl, caption, replyTo);
+    if (!ok) {
+      await tg.sendMessage(chatId, caption + "\n\n(ارسال ویدیو ناموفق بود)", { replyTo });
+    }
+    return;
+  }
+
+  await tg.sendPhoto(chatId, sendUrl, caption, replyTo);
+}
+
+async function makeProxyUrl(origin: string, env: Env, targetUrl: string, ttlSec: number) {
+  const now = Math.floor(Date.now() / 1000);
+  const exp = now + Math.max(30, ttlSec | 0);
+  const data = `${exp}.${targetUrl}`;
+  const sig = await hmacSha256B64Url(env.TG_SECRET, data);
+  const u = new URL(origin + "/proxy");
+  u.searchParams.set("u", targetUrl);
+  u.searchParams.set("e", String(exp));
+  u.searchParams.set("s", sig);
+  return u.toString();
+}
+
+
 function extractCobaltCaption(data: any): string | null {
   const candidates: unknown[] = [
     data?.caption,
@@ -1225,342 +1436,6 @@ async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: numbe
     return { res: null as Response | null, timeout: isTimeout as const };
   }
 }
-
-
-// ============================
-// Public, free download helpers (no Cobalt / no API keys)
-// Notes: Works only for PUBLIC posts. If the platform requires login for a specific URL,
-// we cannot fetch the media URL without user-provided auth.
-// ============================
-
-const SOCIAL_UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
-
-const SOCIAL_HEADERS: Record<string, string> = {
-  "user-agent": SOCIAL_UA,
-  accept: "text/html,application/json;q=0.9,*/*;q=0.8",
-  "accept-language": "en-US,en;q=0.9",
-};
-
-function isInstagramTarget(urlStr: string) {
-  try {
-    const u = new URL(urlStr);
-    const h = u.hostname.toLowerCase();
-    return h === "instagram.com" || h.endsWith(".instagram.com");
-  } catch {
-    return false;
-  }
-}
-
-async function handlePublicDownload(tg: Telegram, chatId: number, targetUrl: string, replyTo?: number) {
-  if (isTwitterTarget(targetUrl)) {
-    await handleTwitterPublicDownload(tg, chatId, targetUrl, replyTo);
-    return;
-  }
-  if (isInstagramTarget(targetUrl)) {
-    await handleInstagramPublicDownload(tg, chatId, targetUrl, replyTo);
-    return;
-  }
-  await tg.sendMessage(chatId, "❌ این لینک پشتیبانی نمی‌شود.", { replyTo });
-}
-
-async function resolveFinalUrlIfShortened(urlStr: string, maxHops = 2): Promise<string> {
-  let current = urlStr;
-  for (let i = 0; i < maxHops; i++) {
-    let u: URL;
-    try {
-      u = new URL(current);
-    } catch {
-      return current;
-    }
-    const h = u.hostname.toLowerCase();
-    if (h !== "t.co") return current;
-
-    // Follow redirect (Cloudflare fetch will follow by default). We use GET to ensure we get final url.
-    const res = await fetch(current, { method: "GET", redirect: "follow", headers: SOCIAL_HEADERS });
-    // If it fails, keep current
-    if (!res.ok) return current;
-    const finalUrl = (res as any).url || current;
-    if (finalUrl === current) return current;
-    current = finalUrl;
-  }
-  return current;
-}
-
-function extractTweetId(urlStr: string): string | null {
-  try {
-    const u = new URL(urlStr);
-    // allow alternative frontends too (fxtwitter/vxtwitter/fixupx etc.)
-    const m = u.pathname.match(/\/status\/(\d+)/i);
-    if (m?.[1]) return m[1];
-    // Sometimes query contains id
-    const qid = u.searchParams.get("id");
-    if (qid && /^\d+$/.test(qid)) return qid;
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-function pickBestMp4Variant(variants: any[] | undefined | null): string | null {
-  if (!Array.isArray(variants) || variants.length === 0) return null;
-  let best: { url: string; bitrate: number } | null = null;
-  for (const v of variants) {
-    const ct = typeof v?.content_type === "string" ? v.content_type : "";
-    const url = typeof v?.url === "string" ? v.url : "";
-    const br = typeof v?.bitrate === "number" ? v.bitrate : -1;
-    if (!url) continue;
-    // prefer mp4
-    if (ct.includes("video/mp4")) {
-      if (!best || br > best.bitrate) best = { url, bitrate: br };
-    }
-  }
-  return best?.url ?? null;
-}
-
-type TwitterMedia =
-  | { kind: "video"; url: string }
-  | { kind: "photo"; url: string };
-
-function pickTwitterMedia(data: any): TwitterMedia | null {
-  const mediaDetails = Array.isArray(data?.mediaDetails) ? data.mediaDetails : [];
-  // Prefer video if present
-  for (const m of mediaDetails) {
-    const type = typeof m?.type === "string" ? m.type : "";
-    if (type === "video" || type === "animated_gif") {
-      const url =
-        pickBestMp4Variant(m?.video_info?.variants) ||
-        pickBestMp4Variant(m?.videoInfo?.variants) ||
-        null;
-      if (url) return { kind: "video", url };
-    }
-  }
-  // Photos
-  for (const m of mediaDetails) {
-    const type = typeof m?.type === "string" ? m.type : "";
-    if (type === "photo") {
-      const url = (typeof m?.media_url_https === "string" && m.media_url_https) || (typeof m?.mediaUrlHttps === "string" && m.mediaUrlHttps) || "";
-      if (url) return { kind: "photo", url };
-    }
-  }
-  // Some responses include `photos` array with `url`
-  const photos = Array.isArray(data?.photos) ? data.photos : [];
-  if (photos[0]?.url) return { kind: "photo", url: String(photos[0].url) };
-
-  return null;
-}
-
-function buildTwitterCaption(data: any): string {
-  const user = data?.user?.screen_name ? `@${String(data.user.screen_name)}` : "";
-  const text = typeof data?.text === "string" ? data.text : "";
-  const t = cleanText(text).slice(0, 700); // keep caption short for TG
-  const parts = [user, t].filter(Boolean);
-  return escapeHtml(parts.join("\n"));
-}
-
-async function fetchTweetResult(tweetId: string): Promise<any | null> {
-  // Undocumented but widely used by the official embed flow; may be flaky.
-  // We try a couple random tokens (some endpoints return 200 + empty body randomly).
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const token = String(Math.floor(Math.random() * 1e12));
-    const url = `https://cdn.syndication.twimg.com/tweet-result?id=${tweetId}&token=${token}&lang=en`;
-    const res = await fetch(url, { method: "GET", headers: { ...SOCIAL_HEADERS, accept: "application/json" } });
-    if (!res.ok) continue;
-    const txt = await res.text().catch(() => "");
-    if (!txt || txt.trim().length < 5) continue;
-    try {
-      return JSON.parse(txt);
-    } catch {
-      continue;
-    }
-  }
-  return null;
-}
-
-async function handleTwitterPublicDownload(tg: Telegram, chatId: number, targetUrl: string, replyTo?: number) {
-  await tg.sendChatAction(chatId, "upload_video");
-
-  const finalUrl = await resolveFinalUrlIfShortened(targetUrl);
-  const tweetId = extractTweetId(finalUrl);
-  if (!tweetId) {
-    await tg.sendMessage(chatId, "❌ نتونستم شناسه توییت رو از لینک پیدا کنم.", { replyTo });
-    return;
-  }
-
-  const data = await fetchTweetResult(tweetId);
-  if (!data) {
-    await tg.sendMessage(chatId, "❌ دریافت اطلاعات توییت ناموفق بود (ممکنه لینک خصوصی/حذف شده باشه یا سرویس موقتاً محدود شده باشه).", {
-      replyTo,
-    });
-    return;
-  }
-
-  const media = pickTwitterMedia(data);
-  if (!media) {
-    await tg.sendMessage(chatId, "❌ توی این توییت مدیای قابل دانلود پیدا نشد.", { replyTo });
-    return;
-  }
-
-  const caption = buildTwitterCaption(data);
-
-  if (media.kind === "video") {
-    const sent = await tg.sendVideo(chatId, media.url, caption, replyTo);
-    if (!sent) {
-      // fallback (TG sometimes rejects direct video urls)
-      await tg.sendMessage(chatId, `✅ لینک ویدیو:\n${escapeHtml(media.url)}`, { replyTo });
-    }
-    return;
-  }
-
-  await tg.sendPhoto(chatId, media.url, caption, replyTo);
-}
-
-function decodeHtmlEntities(s: string) {
-  return s
-    .replace(/&amp;/g, "&")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">");
-}
-
-function firstMetaContent(html: string, propertyOrName: string): string | null {
-  // matches: <meta property="og:video" content="...">
-  const re = new RegExp(`<meta\\s+(?:property|name)="${propertyOrName.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&")}"\\s+content="([^"]+)"`, "i");
-  const m = html.match(re);
-  if (!m?.[1]) return null;
-  return decodeHtmlEntities(m[1]);
-}
-
-type InstagramMedia =
-  | { kind: "video"; url: string; thumb?: string }
-  | { kind: "photo"; url: string };
-
-function parseInstagramShortcode(urlStr: string): { type: "p" | "reel" | "tv"; shortcode: string } | null {
-  try {
-    const u = new URL(urlStr);
-    const p = u.pathname.replace(/\/+$/, "");
-    const m = p.match(/^\/(p|reel|tv)\/([A-Za-z0-9_-]+)/);
-    if (!m) return null;
-    const type = m[1] as "p" | "reel" | "tv";
-    const shortcode = m[2];
-    return { type, shortcode };
-  } catch {
-    return null;
-  }
-}
-
-function pickInstagramFromGraphql(node: any): InstagramMedia | null {
-  if (!node) return null;
-
-  // carousel
-  const edges = node?.edge_sidecar_to_children?.edges;
-  if (Array.isArray(edges) && edges.length > 0) {
-    return pickInstagramFromGraphql(edges[0]?.node);
-  }
-
-  const isVideo = Boolean(node?.is_video);
-  if (isVideo && typeof node?.video_url === "string" && node.video_url) {
-    const thumb = typeof node?.display_url === "string" ? node.display_url : undefined;
-    return { kind: "video", url: node.video_url, thumb };
-  }
-
-  if (typeof node?.display_url === "string" && node.display_url) {
-    return { kind: "photo", url: node.display_url };
-  }
-
-  return null;
-}
-
-async function tryFetchInstagramJson(canonical: string): Promise<InstagramMedia | null> {
-  const url = `${canonical}?__a=1&__d=dis`;
-  const res = await fetch(url, { method: "GET", headers: { ...SOCIAL_HEADERS, accept: "application/json" } });
-  if (!res.ok) return null;
-  const ct = res.headers.get("content-type") || "";
-  if (!ct.includes("json")) return null;
-  const data = await res.json().catch(() => null);
-  if (!data) return null;
-
-  // Old-ish shape: graphql.shortcode_media
-  const node = data?.graphql?.shortcode_media;
-  const fromGraphql = pickInstagramFromGraphql(node);
-  if (fromGraphql) return fromGraphql;
-
-  // Some shapes: items[0]
-  const item = Array.isArray(data?.items) ? data.items[0] : null;
-  if (item) {
-    const videoUrl =
-      (typeof item?.video_versions?.[0]?.url === "string" && item.video_versions[0].url) ||
-      (typeof item?.video_url === "string" && item.video_url) ||
-      "";
-    if (videoUrl) return { kind: "video", url: videoUrl };
-
-    const imgUrl =
-      (typeof item?.image_versions2?.candidates?.[0]?.url === "string" && item.image_versions2.candidates[0].url) ||
-      (typeof item?.display_url === "string" && item.display_url) ||
-      "";
-    if (imgUrl) return { kind: "photo", url: imgUrl };
-  }
-
-  return null;
-}
-
-async function tryFetchInstagramEmbed(canonical: string): Promise<InstagramMedia | null> {
-  const url = `${canonical}embed/`;
-  const res = await fetch(url, { method: "GET", headers: SOCIAL_HEADERS });
-  if (!res.ok) return null;
-  const html = await res.text().catch(() => "");
-  if (!html) return null;
-
-  const ogVideo = firstMetaContent(html, "og:video") || firstMetaContent(html, "og:video:secure_url");
-  if (ogVideo) {
-    const ogImage = firstMetaContent(html, "og:image") || undefined;
-    return { kind: "video", url: ogVideo, thumb: ogImage };
-  }
-
-  const ogImage = firstMetaContent(html, "og:image");
-  if (ogImage) return { kind: "photo", url: ogImage };
-
-  return null;
-}
-
-async function handleInstagramPublicDownload(tg: Telegram, chatId: number, targetUrl: string, replyTo?: number) {
-  await tg.sendChatAction(chatId, "upload_video");
-
-  const info = parseInstagramShortcode(targetUrl);
-  if (!info) {
-    await tg.sendMessage(chatId, "❌ لینک اینستاگرام قابل تشخیص نبود.", { replyTo });
-    return;
-  }
-
-  const canonical = `https://www.instagram.com/${info.type}/${info.shortcode}/`;
-
-  // Try JSON first (fast when it works)
-  const jsonMedia = await tryFetchInstagramJson(canonical);
-  const media = jsonMedia || (await tryFetchInstagramEmbed(canonical));
-
-  if (!media) {
-    await tg.sendMessage(
-      chatId,
-      "❌ نتونستم مدیای اینستاگرام رو استخراج کنم. احتمالاً پست خصوصی/محدود شده یا اینستاگرام برای این لینک لاگین می‌خواد.",
-      { replyTo },
-    );
-    return;
-  }
-
-  const caption = escapeHtml(canonical);
-
-  if (media.kind === "video") {
-    const sent = await tg.sendVideo(chatId, media.url, caption, replyTo);
-    if (!sent) {
-      await tg.sendMessage(chatId, `✅ لینک ویدیو:\n${escapeHtml(media.url)}`, { replyTo });
-    }
-    return;
-  }
-
-  await tg.sendPhoto(chatId, media.url, caption, replyTo);
-}
-
 
 async function handleCobalt(tg: Telegram, chatId: number, targetUrl: string, replyTo?: number) {
   await tg.sendChatAction(chatId, "upload_video");
@@ -1708,7 +1583,7 @@ async function handleCallback(update: any, env: Env, ctx: ExecutionContext, tg: 
   }
 }
 
-async function handleMessage(update: any, env: Env, ctx: ExecutionContext, tg: Telegram) {
+async function handleMessage(update: any, env: Env, ctx: ExecutionContext, tg: Telegram, origin: string) {
   const msg = update?.message;
   if (!msg) return;
 
@@ -1743,9 +1618,15 @@ async function handleMessage(update: any, env: Env, ctx: ExecutionContext, tg: T
   cooldownMem.set(userId, now + COOLDOWN_TTL_MS);
   ctx.waitUntil(env.BOT_KV.put(cooldownKey, "1", { expirationTtl: Math.ceil(COOLDOWN_TTL_MS / 1000) }));
 
-  const downloadUrl = pickCobaltUrl(text);
-  if (downloadUrl) {
-    await handlePublicDownload(tg, chatId, downloadUrl, replyTo);
+  const dlUrl = pickCobaltUrl(text);
+  if (dlUrl) {
+    // Twitter دانلود فعلی خودت را نگه می‌داریم (handleCobalt یا هرچی که داخلش داری).
+    // برای Instagram (پابلیک) از روش بدون Cobalt استفاده می‌کنیم.
+    if (isInstagramTarget(dlUrl)) {
+      await handleInstagramPublic(tg, chatId, dlUrl, replyTo, origin, env);
+      return;
+    }
+    await handleCobalt(tg, chatId, dlUrl, replyTo);
     return;
   }
 
@@ -1797,6 +1678,83 @@ async function handleMessage(update: any, env: Env, ctx: ExecutionContext, tg: T
   await tg.sendMessage(chatId, out, { replyTo });
 }
 
+
+function isAllowedProxyHost(hostname: string) {
+  const h = hostname.toLowerCase();
+  // جلوگیری از open proxy: فقط دامنه‌های رایج CDN اینستاگرام
+  return (
+    h === "instagram.com" ||
+    h.endsWith(".instagram.com") ||
+    h.endsWith(".cdninstagram.com") ||
+    h.endsWith(".fbcdn.net")
+  );
+}
+
+function b64UrlFromBytes(bytes: Uint8Array) {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  const b64 = btoa(bin);
+  return b64.replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+}
+
+async function hmacSha256B64Url(secret: string, data: string) {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sig = await crypto.subtle.sign("HMAC", key, enc.encode(data));
+  return b64UrlFromBytes(new Uint8Array(sig));
+}
+
+function timingSafeEq(a: string, b: string) {
+  if (a.length !== b.length) return false;
+  let out = 0;
+  for (let i = 0; i < a.length; i++) out |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return out === 0;
+}
+
+async function handleProxy(req: Request, env: Env): Promise<Response> {
+  const url = new URL(req.url);
+  if (req.method !== "GET" && req.method !== "HEAD") return new Response("Method Not Allowed", { status: 405 });
+
+  const target = url.searchParams.get("u") || "";
+  const expStr = url.searchParams.get("e") || "";
+  const sig = url.searchParams.get("s") || "";
+
+  const exp = Number(expStr);
+  const now = Math.floor(Date.now() / 1000);
+
+  if (!target || !sig || !Number.isFinite(exp)) return new Response("Bad Request", { status: 400 });
+  if (exp < now - 10) return new Response("Expired", { status: 410 });
+  if (exp > now + 60 * 60) return new Response("Bad Request", { status: 400 });
+
+  const data = `${exp}.${target}`;
+  const expected = await hmacSha256B64Url(env.TG_SECRET, data);
+  if (!timingSafeEq(expected, sig)) return new Response("Forbidden", { status: 403 });
+
+  let tu: URL;
+  try {
+    tu = new URL(target);
+  } catch {
+    return new Response("Bad URL", { status: 400 });
+  }
+  if (!isAllowedProxyHost(tu.hostname)) return new Response("Forbidden host", { status: 403 });
+
+  const proxyHeaders: Record<string, string> = { ...IG_MEDIA_HEADERS };
+  const range = req.headers.get("range");
+  if (range) proxyHeaders.Range = range;
+
+  const upstream = await fetch(tu.toString(), { method: req.method, headers: proxyHeaders, redirect: "follow" });
+  if (!upstream.ok) return new Response("Upstream error", { status: upstream.status });
+
+  const headers = new Headers(upstream.headers);
+  headers.delete("set-cookie");
+  headers.set("cache-control", "public, max-age=300");
+
+  // Telegram به CORS نیاز ندارد، ولی این برای تست مرورگری کمک می‌کند
+  headers.set("access-control-allow-origin", "*");
+
+  return new Response(upstream.body, { status: upstream.status, headers });
+}
+
 export default {
   async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext) {
     await refreshRates(env).catch(() => {});
@@ -1806,6 +1764,10 @@ export default {
     const url = new URL(req.url);
 
     if (url.pathname === "/health") return new Response("ok");
+
+    if (url.pathname === "/proxy") {
+      return handleProxy(req, env);
+    }
 
     if (url.pathname === "/refresh") {
       const key = url.searchParams.get("key") || "";
@@ -1838,7 +1800,7 @@ export default {
     }
 
     if (update?.message) {
-      ctx.waitUntil(handleMessage(update, env, ctx, tg).catch(() => {}));
+      ctx.waitUntil(handleMessage(update, env, ctx, tg, url.origin).catch(() => {}));
       return new Response("ok");
     }
 
