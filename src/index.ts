@@ -3,8 +3,6 @@ export interface Env {
   TG_TOKEN: string;
   TG_SECRET: string;
   ADMIN_KEY: string;
-  /** Optional: e.g. "Api-Key xxxx" or "Bearer xxxx" for private/protected Cobalt instances */
-  COBALT_AUTH?: string;
 }
 
 const BOT_USERNAME = "worker093578bot";
@@ -48,13 +46,14 @@ const COBALT_TIMEOUT_MS_TW = 14_000;
 const COBALT_BACKOFF_BASE_MS = 220;
 const COBALT_BACKOFF_BASE_MS_TW = 320;
 const COBALT_BACKOFF_MAX_MS = 2400;
+const COBALT_HEDGE_CONCURRENCY = 2;
+const COBALT_HEDGE_DELAY_MS = 160;
+const COBALT_HEDGE_DELAY_MS_TW = 260;
 const COBALT_COOLDOWN_429_MS = 20 * 60_000;
 const COBALT_COOLDOWN_403_MS = 25 * 60_000;
 const COBALT_COOLDOWN_5XX_MS = 5 * 60_000;
 const COBALT_COOLDOWN_TIMEOUT_MS = 6 * 60_000;
 const COBALT_COOLDOWN_OTHER_MS = 3 * 60_000;
-const COBALT_COOLDOWN_AUTH_MS = 6 * 60 * 60_000;
-const COBALT_COOLDOWN_HTML_MS = 2 * 60 * 60_000;
 const COBALT_STATE_TTL_MS = 2 * 60 * 60_000;
 
 const TG_JSON_HEADERS = { "content-type": "application/json" } as const;
@@ -530,14 +529,13 @@ class Telegram {
     }
     return this.call("sendPhoto", body, false);
   }
-
-  sendAnimation(chatId: number, animationUrl: string, caption: string, replyTo?: number) {
-    const body: any = { chat_id: chatId, animation: animationUrl, caption, parse_mode: "HTML" };
+  sendDocument(chatId: number, fileUrl: string, caption: string, replyTo?: number) {
+    const body: any = { chat_id: chatId, document: fileUrl, caption, parse_mode: "HTML" };
     if (replyTo) {
       body.reply_to_message_id = replyTo;
       body.allow_sending_without_reply = true;
     }
-    return this.call("sendAnimation", body, true);
+    return this.call("sendDocument", body, true);
   }
 
   sendAudio(chatId: number, audioUrl: string, caption: string, replyTo?: number) {
@@ -549,13 +547,13 @@ class Telegram {
     return this.call("sendAudio", body, true);
   }
 
-  sendDocument(chatId: number, docUrl: string, caption: string, replyTo?: number) {
-    const body: any = { chat_id: chatId, document: docUrl, caption, parse_mode: "HTML" };
+  sendAnimation(chatId: number, animationUrl: string, caption: string, replyTo?: number) {
+    const body: any = { chat_id: chatId, animation: animationUrl, caption, parse_mode: "HTML" };
     if (replyTo) {
       body.reply_to_message_id = replyTo;
       body.allow_sending_without_reply = true;
     }
-    return this.call("sendDocument", body, true);
+    return this.call("sendAnimation", body, false);
   }
 }
 
@@ -1154,121 +1152,136 @@ function buildCobaltCaption(sourceUrl: string, captionText: string | null) {
   return truncate(out, MAX_MEDIA_CAPTION_LEN);
 }
 
-function inferMediaKindFromFilenameOrUrl(filenameOrUrl: string | null): "video" | "photo" | "gif" | "audio" | "doc" {
-  if (!filenameOrUrl) return "video";
-  const s = filenameOrUrl.toLowerCase();
+function cobaltErrorToText(data: any) {
+  const code = data?.error?.code ?? data?.code ?? data?.text ?? "unknown";
+  const ctx = data?.error?.context;
+  const service = typeof ctx?.service === "string" ? ctx.service : null;
+  const limit = typeof ctx?.limit === "number" ? ctx.limit : null;
 
-  const ext = (s.split("?")[0].split("#")[0].match(/\.([a-z0-9]{2,5})$/) || [])[1] || "";
-
-  if (ext === "gif") return "gif";
-  if (["jpg", "jpeg", "png", "webp"].includes(ext)) return "photo";
-  if (["mp3", "m4a", "aac", "wav", "ogg", "opus", "flac"].includes(ext)) return "audio";
-  if (["mp4", "mkv", "webm", "mov"].includes(ext)) return "video";
-
-  return "doc";
+  const parts: string[] = [];
+  parts.push(String(code));
+  if (service) parts.push(`service=${service}`);
+  if (limit !== null) parts.push(`limit=${limit}`);
+  return parts.join(" ");
 }
 
-async function sendBestMedia(
+function extFromFilename(name?: string | null) {
+  const f = (name ?? "").trim().toLowerCase();
+  const m = f.match(/\.([a-z0-9]{1,8})$/i);
+  return m ? m[1].toLowerCase() : "";
+}
+
+function pickSendKind(filename?: string | null, mime?: string | null) {
+  const ext = extFromFilename(filename);
+  const mt = (mime ?? "").toLowerCase();
+
+  if (mt.startsWith("video/")) return "video" as const;
+  if (mt.startsWith("image/")) return ext === "gif" ? ("gif" as const) : ("photo" as const);
+  if (mt.startsWith("audio/")) return "audio" as const;
+
+  if (["mp4", "mov", "mkv", "webm"].includes(ext)) return "video" as const;
+  if (["jpg", "jpeg", "png", "webp"].includes(ext)) return "photo" as const;
+  if (["gif"].includes(ext)) return "gif" as const;
+  if (["mp3", "m4a", "aac", "ogg", "opus", "wav", "flac"].includes(ext)) return "audio" as const;
+
+  return "document" as const;
+}
+
+async function sendCobaltFile(
   tg: Telegram,
   chatId: number,
   url: string,
-  kindHint: "video" | "photo" | "gif" | "audio" | "doc" | null,
+  filename: string | null | undefined,
   caption: string,
   replyTo?: number,
 ) {
-  const kind = kindHint ?? inferMediaKindFromFilenameOrUrl(url);
+  const kind = pickSendKind(filename ?? null, null);
 
-  // Try the intended method; fallback to document if Telegram rejects it.
-  let ok: any = null;
-  if (kind === "photo") ok = await tg.sendPhoto(chatId, url, caption, replyTo);
-  else if (kind === "gif") ok = await tg.sendAnimation(chatId, url, caption, replyTo);
-  else if (kind === "audio") ok = await tg.sendAudio(chatId, url, caption, replyTo);
-  else if (kind === "doc") ok = await tg.sendDocument(chatId, url, caption, replyTo);
-  else ok = await tg.sendVideo(chatId, url, caption, replyTo);
-
-  if (!ok && kind !== "doc") {
+  if (kind === "video") {
+    const ok = await tg.sendVideo(chatId, url, caption, replyTo);
+    if (ok) return true;
+    // بعضی لینک‌ها به عنوان video reject می‌شن؛ document معمولاً همیشه جواب می‌ده
     await tg.sendDocument(chatId, url, caption, replyTo);
+    return true;
   }
+
+  if (kind === "photo") {
+    await tg.sendPhoto(chatId, url, caption, replyTo);
+    return true;
+  }
+
+  if (kind === "gif") {
+    await tg.sendAnimation(chatId, url, caption, replyTo);
+    return true;
+  }
+
+  if (kind === "audio") {
+    await tg.sendAudio(chatId, url, caption, replyTo);
+    return true;
+  }
+
+  await tg.sendDocument(chatId, url, caption, replyTo);
+  return true;
 }
 
 async function processCobaltResponse(tg: Telegram, chatId: number, data: any, sourceUrl: string, replyTo?: number) {
-  // Cobalt 11.x error shape: { status:"error", error:{code, context?} }
   if (data?.status === "error") {
-    const code = (typeof data?.error?.code === "string" && data.error.code) || (typeof data?.text === "string" && data.text) || "Cobalt Error";
-    throw new Error(code);
+    // برای اینکه اینستنس‌های بعدی هم تست بشن، throw می‌کنیم (handleCobalt ادامه می‌ده)
+    throw new Error(cobaltErrorToText(data));
   }
 
-  const overallCaptionRaw =
-    extractCobaltCaption(data) ||
-    (typeof data?.output?.metadata?.title === "string" ? cleanText(data.output.metadata.title) : null);
+  const overallCaptionRaw = extractCobaltCaption(data);
 
-  // Cobalt 11.x direct URL: tunnel/redirect (legacy: stream)
+  // v11.x (tunnel/redirect) + سازگاری با قدیمی‌ترها (stream)
   if (data?.status === "tunnel" || data?.status === "redirect" || data?.status === "stream") {
     const cap = buildCobaltCaption(sourceUrl, overallCaptionRaw);
-    const url = String(data?.url || "");
-    if (!url) throw new Error("Missing url");
-
-    const filename = typeof data?.filename === "string" ? data.filename : null;
-    const kindHint = inferMediaKindFromFilenameOrUrl(filename || url);
-
-    await sendBestMedia(tg, chatId, url, kindHint, cap, replyTo);
+    const url = String(data.url || "");
+    const filename = typeof data.filename === "string" ? data.filename : null;
+    if (!url) throw new Error("Cobalt: empty url");
+    await sendCobaltFile(tg, chatId, url, filename, cap, replyTo);
     return;
   }
 
-  // Cobalt 11.x: needs local merge/remux etc. We'll provide tunnels (best-effort).
   if (data?.status === "local-processing") {
     const tunnels: string[] = Array.isArray(data?.tunnel) ? data.tunnel.filter((x: any) => typeof x === "string") : [];
-    const outName = typeof data?.output?.filename === "string" ? data.output.filename : null;
+    const outputName = typeof data?.output?.filename === "string" ? data.output.filename : null;
+    const lpType = typeof data?.type === "string" ? data.type : null;
 
-    if (tunnels.length === 0) throw new Error("local-processing بدون tunnel");
+    const linkLines = tunnels.slice(0, 6).map((u) => `• ${u}`);
+    const linksText = linkLines.length ? linkLines.join("\n") : "—";
 
-    const linkLines = tunnels.slice(0, 4).map((u: string, i: number) => `🔸 <a href="${escapeAttr(u)}">فایل ${i + 1}</a>`);
-    const cap = buildCobaltCaption(sourceUrl, overallCaptionRaw);
-    const extra = outName ? `
+    const text = [
+      "⚠️ این دانلود نیاز به پردازش محلی دارد (local-processing).",
+      outputName ? `📄 خروجی: <code>${escapeHtml(outputName)}</code>` : null,
+      lpType ? `🧩 نوع: <code>${escapeHtml(lpType)}</code>` : null,
+      "",
+      "لینک‌های تونل:",
+      linksText,
+      "",
+      `🔗 لینک اصلی: ${sourceUrl}`,
+    ]
+      .filter(Boolean)
+      .join("\n");
 
-📄 خروجی: <code>${escapeHtml(outName)}</code>` : "";
-    const msg =
-      `⚠️ این محتوا نیاز به پردازش محلی (merge/remux) دارد و ربات نمی‌تواند آن را مستقیم تبدیل کند.` +
-      extra +
-      `
-
-${linkLines.join("
-")}
-
-${cap}`;
-
-    await tg.sendMessage(chatId, truncate(msg, 3800), { replyTo });
+    await tg.sendMessage(chatId, text, { replyTo });
     return;
   }
 
-  // Cobalt 11.x: multiple items
   if (data?.status === "picker" && Array.isArray(data.picker) && data.picker.length > 0) {
-    const items = data.picker.slice(0, 4);
+    const items = data.picker.slice(0, 6);
     for (const item of items) {
-      const itemCapRaw =
-        (typeof item?.caption === "string" && cleanText(item.caption)) ||
-        (typeof item?.description === "string" && cleanText(item.description)) ||
-        (typeof item?.title === "string" && cleanText(item.title)) ||
-        overallCaptionRaw ||
-        null;
+      const itemCapRaw = typeof item?.caption === "string" ? cleanText(item.caption) : null;
+      const cap = buildCobaltCaption(sourceUrl, itemCapRaw ?? overallCaptionRaw);
 
-      const cap = buildCobaltCaption(sourceUrl, itemCapRaw);
-      const url = String(item?.url || "");
+      const url = typeof item?.url === "string" ? item.url : "";
       if (!url) continue;
 
-      // 11.x picker type: photo/video/gif
-      const type = typeof item?.type === "string" ? item.type : null;
-      const kindHint = (type === "photo" ? "photo" : type === "gif" ? "gif" : type === "video" ? "video" : null) as any;
-
-      await sendBestMedia(tg, chatId, url, kindHint, cap, replyTo);
+      const t = String(item?.type || "");
+      if (t === "video") await tg.sendVideo(chatId, url, cap, replyTo);
+      else if (t === "photo") await tg.sendPhoto(chatId, url, cap, replyTo);
+      else if (t === "gif") await tg.sendAnimation(chatId, url, cap, replyTo);
+      else await tg.sendDocument(chatId, url, cap, replyTo);
     }
-
-    // If picker has background audio
-    if (typeof data?.audio === "string" && data.audio) {
-      const cap = buildCobaltCaption(sourceUrl, overallCaptionRaw);
-      await sendBestMedia(tg, chatId, data.audio, "audio", cap, replyTo);
-    }
-
     return;
   }
 
@@ -1303,60 +1316,32 @@ function markCobaltOk(baseUrl: string, now: number) {
   s.lastOkAt = now;
 }
 
-function parseRetryAfterMs(h: string | null, now: number): number | null {
-  if (!h) return null;
-  const n = Number(h);
-  if (Number.isFinite(n) && n >= 0) return Math.round(n * 1000);
-  const t = Date.parse(h);
-  if (Number.isFinite(t)) return Math.max(0, t - now);
-  return null;
-}
-
-function parseRateLimitResetMs(h: string | null, now: number): number | null {
-  if (!h) return null;
-  const n = Number(h);
-  if (Number.isFinite(n) && n >= 0) {
-    // Spec allows delta-seconds OR absolute IMF-fixdate. Some servers also send epoch seconds.
-    if (n > 10_000_000_000) return Math.max(0, n - now); // looks like ms timestamp
-    if (n > 1_000_000_000) return Math.max(0, (n * 1000) - now); // looks like epoch seconds
-    return Math.round(n * 1000); // delta-seconds
-  }
-  const t = Date.parse(h);
-  if (Number.isFinite(t)) return Math.max(0, t - now);
-  return null;
-}
-
-function cooldownUntilFromHeaders(res: Response, now: number): number | null {
-  const ra = parseRetryAfterMs(res.headers.get("Retry-After"), now);
-  if (ra != null) return now + ra;
-  const rl = parseRateLimitResetMs(res.headers.get("RateLimit-Reset"), now);
-  if (rl != null) return now + rl;
-  return null;
-}
-
 function markCobaltFail(
   baseUrl: string,
   now: number,
-  info: { status?: number; timeout?: boolean; cooldownUntil?: number; reason?: "auth" | "html" | "other" },
+  info: { status?: number; timeout?: boolean; cooldownMs?: number; hard?: boolean },
 ) {
   const s = getCobaltState(baseUrl, now);
   s.failCount = Math.min(50, (s.failCount || 0) + 1);
 
-  if (info.cooldownUntil && Number.isFinite(info.cooldownUntil)) {
-    s.cooldownUntil = Math.max(s.cooldownUntil || 0, info.cooldownUntil);
-    return;
-  }
-
   const st = info.status ?? 0;
-  let cd = COBALT_COOLDOWN_OTHER_MS;
 
-  if (info.reason === "auth") cd = COBALT_COOLDOWN_AUTH_MS;
-  else if (info.reason === "html") cd = COBALT_COOLDOWN_HTML_MS;
-  else if (info.timeout) cd = COBALT_COOLDOWN_TIMEOUT_MS;
-  else if (st === 429) cd = COBALT_COOLDOWN_429_MS;
-  else if (st === 403 || st === 401) cd = COBALT_COOLDOWN_403_MS;
-  else if (st >= 500) cd = COBALT_COOLDOWN_5XX_MS;
-  else if (st === 0) cd = COBALT_COOLDOWN_TIMEOUT_MS;
+  let cd =
+    typeof info.cooldownMs === "number"
+      ? Math.max(0, info.cooldownMs)
+      : info.timeout
+        ? COBALT_COOLDOWN_TIMEOUT_MS
+        : st === 429
+          ? COBALT_COOLDOWN_429_MS
+          : st === 403
+            ? COBALT_COOLDOWN_403_MS
+            : st >= 500
+              ? COBALT_COOLDOWN_5XX_MS
+              : st === 0
+                ? COBALT_COOLDOWN_TIMEOUT_MS
+                : COBALT_COOLDOWN_OTHER_MS;
+
+  if (info.hard) cd = Math.max(cd, 60 * 60_000); // 1h
 
   s.cooldownUntil = Math.max(s.cooldownUntil || 0, now + cd);
 }
@@ -1377,15 +1362,8 @@ function sortCobaltBases(bases: string[], now: number) {
   return [...available, ...cooled];
 }
 
-async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number, externalSignal?: AbortSignal) {
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number) {
   const ac = new AbortController();
-
-  // Link external abort (e.g., hedged request winner aborts the rest)
-  if (externalSignal) {
-    if (externalSignal.aborted) ac.abort();
-    else externalSignal.addEventListener("abort", () => ac.abort(), { once: true });
-  }
-
   const t = setTimeout(() => ac.abort(), timeoutMs);
   try {
     const res = await fetch(url, { ...init, signal: ac.signal });
@@ -1399,13 +1377,128 @@ async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: numbe
   }
 }
 
-async function handleCobalt(
-  tg: Telegram,
-  chatId: number,
-  targetUrl: string,
-  replyTo?: number,
-  cobaltAuth?: string,
-) {
+function parseRetryAfterMs(res: Response, now: number) {
+  const v = res.headers.get("retry-after");
+  if (!v) return null;
+
+  const asNum = Number(v);
+  if (Number.isFinite(asNum)) return Math.max(0, asNum * 1000);
+
+  const asDate = Date.parse(v);
+  if (!Number.isNaN(asDate)) return Math.max(0, asDate - now);
+
+  return null;
+}
+
+function parseRateLimitResetMs(res: Response, now: number) {
+  // طبق RateLimit-* draft، RateLimit-Reset معمولاً delta-seconds است
+  const v = res.headers.get("ratelimit-reset") || res.headers.get("x-ratelimit-reset");
+  if (!v) return null;
+
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+
+  // delta-seconds
+  if (n >= 0 && n < 60 * 60 * 24 * 365) return Math.max(0, n * 1000);
+
+  // epoch seconds (برخی سرویس‌ها)
+  const epochMs = n * 1000;
+  if (epochMs > 0) return Math.max(0, epochMs - now);
+
+  return null;
+}
+
+type CobaltAttempt = {
+  ok: boolean;
+  baseUrl: string;
+  now: number;
+  data?: any;
+  status?: number;
+  timeout?: boolean;
+  cooldownMs?: number;
+  hard?: boolean;
+  err?: string;
+};
+
+async function cobaltTryBase(
+  baseUrl: string,
+  body: string,
+  timeoutMs: number,
+  ac: AbortController,
+): Promise<CobaltAttempt> {
+  const endpoint = baseUrl.replace(/\/+$/, "");
+  const startedAt = Date.now();
+
+  const t = setTimeout(() => ac.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(endpoint, { method: "POST", headers: COBALT_HEADERS, body, signal: ac.signal });
+    clearTimeout(t);
+
+    const ct = (res.headers.get("content-type") || "").toLowerCase();
+
+    // bot-protection / challenge معمولاً HTML برمی‌گردونه
+    if (ct.includes("text/html")) {
+      return {
+        ok: false,
+        baseUrl,
+        now: Date.now(),
+        status: res.status || 0,
+        cooldownMs: 60 * 60_000,
+        hard: true,
+        err: "html/bot-protection",
+      };
+    }
+
+    if (!res.ok) {
+      const now2 = Date.now();
+      const retryAfterMs = res.status === 429 ? parseRetryAfterMs(res, now2) : null;
+      const resetMs = res.status === 429 ? parseRateLimitResetMs(res, now2) : null;
+      const cd = retryAfterMs ?? resetMs ?? undefined;
+
+      return {
+        ok: false,
+        baseUrl,
+        now: now2,
+        status: res.status,
+        cooldownMs: cd,
+        err: `http:${res.status}`,
+      };
+    }
+
+    let data: any;
+    try {
+      data = await res.json<any>();
+    } catch {
+      return { ok: false, baseUrl, now: Date.now(), status: 0, err: "json-parse" };
+    }
+
+    if (data?.status === "error") {
+      const msg = cobaltErrorToText(data);
+      const code = data?.error?.code;
+      const hard = code === "api.auth..missing" || code === "api.auth..invalid";
+      return { ok: false, baseUrl, now: Date.now(), status: 200, hard, err: msg };
+    }
+
+    return { ok: true, baseUrl, now: Date.now(), data, status: 200 };
+  } catch (e: any) {
+    clearTimeout(t);
+    const msg = (String(e?.name ?? "") + ":" + String(e?.message ?? e)).toLowerCase();
+    const isTimeout = msg.includes("abort") || msg.includes("timeout");
+    return {
+      ok: false,
+      baseUrl,
+      now: Date.now(),
+      status: 0,
+      timeout: isTimeout,
+      err: isTimeout ? "timeout" : "fetch",
+    };
+  } finally {
+    void startedAt;
+  }
+}
+
+async function handleCobalt(tg: Telegram, chatId: number, targetUrl: string, replyTo?: number) {
   await tg.sendChatAction(chatId, "upload_video");
 
   const now = Date.now();
@@ -1414,156 +1507,133 @@ async function handleCobalt(
   const isTw = isTwitterTarget(targetUrl);
   const timeoutMs = isTw ? COBALT_TIMEOUT_MS_TW : COBALT_TIMEOUT_MS;
   const baseDelay = isTw ? COBALT_BACKOFF_BASE_MS_TW : COBALT_BACKOFF_BASE_MS;
+  const hedgeDelay = isTw ? COBALT_HEDGE_DELAY_MS_TW : COBALT_HEDGE_DELAY_MS;
 
   const bases = sortCobaltBases([...COBALT_INSTANCES], now);
 
-  const endpointsForBase = (baseUrl: string) => {
-    const base = baseUrl.replace(/\/+$/, "");
-    // Prefer POST / (Cobalt 11.x); keep /api/json as legacy fallback.
-    return [base, `${base}/api/json`];
-  };
-
-  // Prebuild request bodies
-  const bodyV11 = JSON.stringify({
+  // طبق داک: POST / + schema جدید
+  const body = JSON.stringify({
     url: targetUrl,
     downloadMode: "auto",
     filenameStyle: "basic",
     videoQuality: "1080",
     localProcessing: "disabled",
     youtubeVideoCodec: "h264",
+    youtubeVideoContainer: "auto",
     convertGif: true,
     allowH265: false,
   });
 
-  const bodyLegacy = JSON.stringify({ url: targetUrl, vCodec: "h264" });
+  let attemptRound = 0;
+  let lastErr: string | null = null;
 
-  const headersBase: Record<string, string> = { ...COBALT_HEADERS };
-  if (cobaltAuth) headersBase.Authorization = cobaltAuth;
+  let idx = 0;
+  while (idx < bases.length) {
+    // انتخاب 1-2 اینستنس (با رد کردن cooldownهای فعال)
+    let base1: string | null = null;
+    while (idx < bases.length && !base1) {
+      const b = bases[idx++];
+      const s = getCobaltState(b, Date.now());
+      if (s.cooldownUntil > Date.now()) continue;
+      base1 = b;
+    }
+    if (!base1) break;
 
-  const attemptBase = async (baseUrl: string, signal: AbortSignal, startDelayMs: number) => {
-    if (startDelayMs > 0) await sleep(startDelayMs);
+    let base2: string | null = null;
+    while (idx < bases.length && !base2) {
+      const b = bases[idx++];
+      const s = getCobaltState(b, Date.now());
+      if (s.cooldownUntil > Date.now()) continue;
+      base2 = b;
+    }
 
-    const s = getCobaltState(baseUrl, Date.now());
-    const endpoints = endpointsForBase(baseUrl);
+    if (attemptRound > 0) {
+      const jitter = Math.floor(Math.random() * 180);
+      const step = Math.min(COBALT_BACKOFF_MAX_MS, baseDelay * attemptRound);
+      const extra = Math.min(800, (getCobaltState(base1, Date.now()).failCount || 0) * 20);
+      await sleep(step + jitter + extra);
+    }
+    attemptRound++;
 
-    for (const endpoint of endpoints) {
-      const now2 = Date.now();
-      if (now2 < (s.cooldownUntil || 0)) continue;
+    const ac1 = new AbortController();
+    const p1 = cobaltTryBase(base1, body, timeoutMs, ac1);
 
-      const endpointIsLegacy = endpoint.endsWith("/api/json");
-      const body = endpointIsLegacy ? bodyLegacy : bodyV11;
+    let ac2: AbortController | null = null;
+    let p2: Promise<CobaltAttempt> | null = null;
 
-      const { res, timeout } = await fetchWithTimeout(endpoint, { method: "POST", headers: headersBase, body }, timeoutMs, signal);
+    if (base2) {
+      await sleep(hedgeDelay);
+      ac2 = new AbortController();
+      p2 = cobaltTryBase(base2, body, timeoutMs, ac2);
+      // جلوگیری از unhandled rejection اگر زودتر برگشتیم
+      p2.catch(() => null);
+    }
 
-      if (!res) {
-        markCobaltFail(baseUrl, Date.now(), { timeout: true });
-        continue;
-      }
+    const first = await Promise.race([p1, p2 ?? p1]);
 
-      // Quick HTML / bot-protection detection
-      const ctype = (res.headers.get("content-type") || "").toLowerCase();
-      if (ctype.includes("text/html")) {
-        markCobaltFail(baseUrl, Date.now(), { status: res.status, reason: "html" });
-        continue;
-      }
-
-      if (!res.ok) {
-        const now3 = Date.now();
-        const cd = res.status === 429 ? cooldownUntilFromHeaders(res, now3) : null;
-        markCobaltFail(baseUrl, now3, { status: res.status, cooldownUntil: cd ?? undefined });
-
-        // If unauthorized/forbidden, try to parse json to detect auth-required and cooldown longer.
-        if (res.status === 401 || res.status === 403) {
-          const t = await res.text().catch(() => "");
-          if (t && t.toLowerCase().includes("api.auth")) {
-            markCobaltFail(baseUrl, Date.now(), { status: res.status, reason: "auth" });
-          }
-        }
-        continue;
-      }
-
-      let data: any = null;
+    const tryProcess = async (r: CobaltAttempt) => {
       try {
-        data = await res.json<any>();
-      } catch {
-        markCobaltFail(baseUrl, Date.now(), { status: 0 });
-        continue;
-      }
-
-      // If instance requires auth, it may still return {status:"error", error:{code:"api.auth..missing"}}
-      if (data?.status === "error" && typeof data?.error?.code === "string" && data.error.code.startsWith("api.auth")) {
-        markCobaltFail(baseUrl, Date.now(), { status: 401, reason: "auth" });
-        continue;
-      }
-
-      try {
-        await processCobaltResponse(tg, chatId, data, targetUrl, replyTo);
-        markCobaltOk(baseUrl, Date.now());
-        return { ok: true as const };
+        await processCobaltResponse(tg, chatId, r.data, targetUrl, replyTo);
+        markCobaltOk(r.baseUrl, Date.now());
+        return true;
       } catch (e: any) {
-        // If cobalt returns error status inside 200, treat as failure too
-        const now4 = Date.now();
-        const st = typeof res.status === "number" ? res.status : 0;
-        markCobaltFail(baseUrl, now4, { status: st });
-        void e;
-        continue;
+        lastErr = String(e?.message ?? e);
+        markCobaltFail(r.baseUrl, Date.now(), { status: 200 });
+        return false;
       }
+    };
+
+    if (first.ok) {
+      // abort کردن درخواست کندتر
+      if (first.baseUrl === base1 && ac2) {
+        try { ac2.abort(); } catch {}
+      } else {
+        try { ac1.abort(); } catch {}
+      }
+
+      if (await tryProcess(first)) return true;
+      continue;
     }
 
-    return { ok: false as const };
-  };
-
-  // Hedged requests: try 2 bases at a time (2nd starts slightly later).
-  const HEDGE = 2;
-  for (let i = 0; i < bases.length; i += HEDGE) {
-    const group = bases.slice(i, i + HEDGE);
-    if (group.length === 0) break;
-
-    // Backoff between groups (global attempt count)
-    const attempt = i / HEDGE;
-    if (attempt > 0) {
-      const jitter = Math.floor(Math.random() * 220);
-      const step = Math.min(COBALT_BACKOFF_MAX_MS, baseDelay * attempt);
-      await sleep(step + jitter);
-    }
-
-    const controllers = group.map(() => new AbortController());
-    const tasks = group.map((baseUrl, idx) => attemptBase(baseUrl, controllers[idx].signal, idx === 0 ? 0 : 220));
-
-    const winner = await new Promise<{ ok: boolean }>((resolve) => {
-      let done = 0;
-      let resolved = false;
-
-      tasks.forEach((p, idx) => {
-        p.then((r) => {
-          done++;
-          if (!resolved && r.ok) {
-            resolved = true;
-            // abort the rest
-            controllers.forEach((c, j) => {
-              if (j !== idx) c.abort();
-            });
-            resolve({ ok: true });
-            return;
-          }
-          if (!resolved && done === tasks.length) resolve({ ok: false });
-        }).catch(() => {
-          done++;
-          if (!resolved && done === tasks.length) resolve({ ok: false });
-        });
-      });
+    // fail اول
+    if (first.err) lastErr = first.err;
+    markCobaltFail(first.baseUrl, first.now, {
+      status: first.status,
+      timeout: first.timeout,
+      cooldownMs: first.cooldownMs,
+      hard: first.hard,
     });
 
-    if (winner.ok) return true;
+    // تلاش دوم (اگر داریم)
+    if (p2) {
+      const second = await (first.baseUrl === base1 ? p2 : p1);
+
+      if (second.ok) {
+        // abort کردن اون یکی
+        if (second.baseUrl === base1 && ac2) {
+          try { ac2.abort(); } catch {}
+        } else {
+          try { ac1.abort(); } catch {}
+        }
+
+        if (await tryProcess(second)) return true;
+        continue;
+      }
+
+      if (second.err) lastErr = second.err;
+      markCobaltFail(second.baseUrl, second.now, {
+        status: second.status,
+        timeout: second.timeout,
+        cooldownMs: second.cooldownMs,
+        hard: second.hard,
+      });
+    }
   }
 
-  await tg.sendMessage(
-    chatId,
-    `❌ دانلود انجام نشد.
-
-اگر همهٔ اینستنس‌ها ارور «api.auth..missing» یا صفحهٔ HTML می‌دهند، یعنی اینستنس‌ها محافظت شده‌اند و باید یا اینستنس خودتان را بالا بیاورید یا از صاحب یک اینستنس Api-Key بگیرید.`,
-    { replyTo },
-  );
+  const tail = lastErr ? `\n<code>${escapeHtml(lastErr)}</code>` : "";
+  await tg.sendMessage(chatId, `❌ دانلود انجام نشد. (ممکن است اینستنس‌ها بلاک/ریت‌لیمیت باشند یا لینک قابل پردازش نباشد.)${tail}`, {
+    replyTo,
+  });
   return true;
 }
 
@@ -1674,7 +1744,7 @@ async function handleMessage(update: any, env: Env, ctx: ExecutionContext, tg: T
 
   const cobaltUrl = pickCobaltUrl(text);
   if (cobaltUrl) {
-    await handleCobalt(tg, chatId, cobaltUrl, replyTo, env.COBALT_AUTH);
+    await handleCobalt(tg, chatId, cobaltUrl, replyTo);
     return;
   }
 
