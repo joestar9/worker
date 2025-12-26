@@ -663,6 +663,235 @@ async function tgSendPhoto(env: Env, chatId: number, photoUrl: string, caption: 
   await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(() => {});
 }
 
+// -----------------------------
+// Public media download (ported from x-ok.ts)
+// Supports: Twitter/X + Instagram links (Instagram handled by existing handleInstagram)
+// -----------------------------
+
+const SOCIAL_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
+
+const SOCIAL_HEADERS: Record<string, string> = {
+  "user-agent": SOCIAL_UA,
+  accept: "text/html,application/json;q=0.9,*/*;q=0.8",
+  "accept-language": "en-US,en;q=0.9",
+};
+
+function escapeHtml(s: string) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function cleanText(s: string) {
+  return s
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .replace(/\u0000/g, "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
+function pickCobaltUrl(text: string): string | null {
+  const m = text.match(/https?:\/\/[^\s<>()]+/i);
+  if (!m) return null;
+  const raw = m[0].replace(/[)\]}>,.!?؟؛:]+$/g, "");
+  try {
+    const u = new URL(raw);
+    const h = u.hostname.toLowerCase();
+    const ok =
+      h === "instagram.com" ||
+      h.endsWith(".instagram.com") ||
+      h === "twitter.com" ||
+      h.endsWith(".twitter.com") ||
+      h === "x.com" ||
+      h.endsWith(".x.com") ||
+      h === "t.co" ||
+      h === "fxtwitter.com" ||
+      h === "vxtwitter.com" ||
+      h === "fixupx.com" ||
+      h === "twittpr.com";
+    return ok ? u.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+function isTwitterTarget(urlStr: string) {
+  try {
+    const u = new URL(urlStr);
+    const h = u.hostname.toLowerCase();
+    return (
+      h === "twitter.com" ||
+      h.endsWith(".twitter.com") ||
+      h === "x.com" ||
+      h.endsWith(".x.com") ||
+      h === "t.co" ||
+      h === "fxtwitter.com" ||
+      h === "vxtwitter.com" ||
+      h === "fixupx.com" ||
+      h === "twittpr.com"
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isInstagramTarget(urlStr: string) {
+  try {
+    const u = new URL(urlStr);
+    const h = u.hostname.toLowerCase();
+    return h === "instagram.com" || h.endsWith(".instagram.com");
+  } catch {
+    return false;
+  }
+}
+
+async function resolveFinalUrlIfShortened(urlStr: string, maxHops = 2): Promise<string> {
+  let current = urlStr;
+  for (let i = 0; i < maxHops; i++) {
+    let u: URL;
+    try {
+      u = new URL(current);
+    } catch {
+      return current;
+    }
+    const h = u.hostname.toLowerCase();
+    if (h !== "t.co") return current;
+
+    const res = await fetch(current, { method: "GET", redirect: "follow", headers: SOCIAL_HEADERS });
+    if (!res.ok) return current;
+    const finalUrl = (res as any).url || current;
+    if (finalUrl === current) return current;
+    current = finalUrl;
+  }
+  return current;
+}
+
+function extractTweetId(urlStr: string): string | null {
+  try {
+    const u = new URL(urlStr);
+    const m = u.pathname.match(/\/status\/(\d+)/i);
+    if (m?.[1]) return m[1];
+    const qid = u.searchParams.get("id");
+    if (qid && /^\d+$/.test(qid)) return qid;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function pickBestMp4Variant(variants: any[] | undefined | null): string | null {
+  if (!Array.isArray(variants) || variants.length === 0) return null;
+  let best: { url: string; bitrate: number } | null = null;
+  for (const v of variants) {
+    const ct = typeof v?.content_type === "string" ? v.content_type : "";
+    const url = typeof v?.url === "string" ? v.url : "";
+    const br = typeof v?.bitrate === "number" ? v.bitrate : -1;
+    if (!url) continue;
+    if (ct.includes("video/mp4")) {
+      if (!best || br > best.bitrate) best = { url, bitrate: br };
+    }
+  }
+  return best?.url ?? null;
+}
+
+type TwitterMedia =
+  | { kind: "video"; url: string }
+  | { kind: "photo"; url: string };
+
+function pickTwitterMedia(data: any): TwitterMedia | null {
+  const mediaDetails = Array.isArray(data?.mediaDetails) ? data.mediaDetails : [];
+  for (const m of mediaDetails) {
+    const type = typeof m?.type === "string" ? m.type : "";
+    if (type === "video" || type === "animated_gif") {
+      const url = pickBestMp4Variant(m?.video_info?.variants) || pickBestMp4Variant(m?.videoInfo?.variants) || null;
+      if (url) return { kind: "video", url };
+    }
+  }
+  for (const m of mediaDetails) {
+    const type = typeof m?.type === "string" ? m.type : "";
+    if (type === "photo") {
+      const url = typeof m?.media_url_https === "string" ? m.media_url_https : typeof m?.mediaUrlHttps === "string" ? m.mediaUrlHttps : "";
+      if (url) return { kind: "photo", url };
+    }
+  }
+  return null;
+}
+
+function buildTwitterCaption(data: any): string {
+  const user = data?.user?.screen_name ? `@${String(data.user.screen_name)}` : "";
+  const text = typeof data?.text === "string" ? data.text : "";
+  const t = cleanText(text).slice(0, 700);
+  const parts = [user, t].filter(Boolean);
+  return escapeHtml(parts.join("\n"));
+}
+
+async function fetchTweetResult(tweetId: string): Promise<any | null> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const token = String(Math.floor(Math.random() * 1e12));
+    const url = `https://cdn.syndication.twimg.com/tweet-result?id=${tweetId}&token=${token}&lang=en`;
+    const res = await fetch(url, { method: "GET", headers: { ...SOCIAL_HEADERS, accept: "application/json" } });
+    if (!res.ok) continue;
+    const txt = await res.text().catch(() => "");
+    if (!txt || txt.trim().length < 5) continue;
+    try {
+      return JSON.parse(txt);
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+async function handleTwitterPublicDownload(env: Env, chatId: number, targetUrl: string, replyTo?: number) {
+  await sendChatAction(env, chatId, "upload_video");
+
+  const finalUrl = await resolveFinalUrlIfShortened(targetUrl);
+  const tweetId = extractTweetId(finalUrl);
+  if (!tweetId) {
+    await tgSend(env, chatId, "❌ نتونستم شناسه توییت رو از لینک پیدا کنم.", replyTo);
+    return;
+  }
+
+  const data = await fetchTweetResult(tweetId);
+  if (!data) {
+    await tgSend(
+      env,
+      chatId,
+      "❌ دریافت اطلاعات توییت ناموفق بود (ممکنه لینک خصوصی/حذف شده باشه یا سرویس موقتاً محدود شده باشه).",
+      replyTo,
+    );
+    return;
+  }
+
+  const media = pickTwitterMedia(data);
+  if (!media) {
+    await tgSend(env, chatId, "❌ مدیایی داخل این توییت پیدا نشد.", replyTo);
+    return;
+  }
+
+  const caption = buildTwitterCaption(data);
+  if (media.kind === "video") {
+    await tgSendVideo(env, chatId, media.url, caption, replyTo);
+    return;
+  }
+  await tgSendPhoto(env, chatId, media.url, caption, replyTo);
+}
+
+async function handlePublicDownload(env: Env, chatId: number, targetUrl: string, replyTo?: number) {
+  if (isTwitterTarget(targetUrl)) {
+    await handleTwitterPublicDownload(env, chatId, targetUrl, replyTo);
+    return;
+  }
+  if (isInstagramTarget(targetUrl)) {
+    // reuse existing instagram handler (expects text containing a link)
+    await handleInstagram(env, chatId, targetUrl, replyTo);
+    return;
+  }
+  await tgSend(env, chatId, "❌ این لینک پشتیبانی نمی‌شود.", replyTo);
+}
+
 async function handleInstagram(env: Env, chatId: number, text: string, replyTo?: number) {
   const urlMatch = text.match(/(https?:\/\/(?:www\.)?instagram\.com\/[^ \n]+)/);
   if (!urlMatch) return false;
@@ -1256,6 +1485,11 @@ export default {
     const cmd = normalizeCommand(textNorm);
 
     const run = async () => {
+      const downloadUrl = pickCobaltUrl(text);
+      if (downloadUrl) {
+        await handlePublicDownload(env, chatId, downloadUrl, replyTo);
+        return;
+      }
       if (text.includes("instagram.com")) {
         await handleInstagram(env, chatId, text, replyTo);
         return;
