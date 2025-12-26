@@ -499,6 +499,14 @@ class Telegram {
     }
     return this.call("sendPhoto", body, false);
   }
+  sendDocument(chatId: number, fileUrl: string, caption: string, replyTo?: number) {
+    const body: any = { chat_id: chatId, document: fileUrl, caption, parse_mode: "HTML" };
+    if (replyTo) {
+      body.reply_to_message_id = replyTo;
+      body.allow_sending_without_reply = true;
+    }
+    return this.call("sendDocument", body, false);
+  }
 }
 
 function extractUnitFromName(name: string) {
@@ -1021,7 +1029,7 @@ function getHelpMessage() {
 }
 
 
-function pickDownloadUrl(text: string): string | null {
+function pickSocialUrl(text: string): string | null {
   const m = text.match(/https?:\/\/[^\s<>()]+/i);
   if (!m) return null;
   const raw = m[0].replace(/[)\]}>,.!?؟؛:]+$/g, "");
@@ -1055,11 +1063,72 @@ function isTwitterTarget(urlStr: string) {
   }
 }
 
+const SOCIAL_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
+
 const SOCIAL_HEADERS: Record<string, string> = {
   "user-agent": SOCIAL_UA,
   accept: "text/html,application/json;q=0.9,*/*;q=0.8",
   "accept-language": "en-US,en;q=0.9",
 };
+
+function buildProxyUrl(origin: string, mediaUrl: string): string {
+  const u = new URL("/proxy", origin);
+  u.searchParams.set("u", mediaUrl);
+  return u.toString();
+}
+
+function isAllowedProxyTarget(mediaUrl: string): boolean {
+  // prevent open-proxy abuse; only allow Instagram CDN urls
+  return isLikelyIgCdn(mediaUrl);
+}
+
+async function handleProxy(req: Request): Promise<Response> {
+  const url = new URL(req.url);
+  const target = url.searchParams.get("u");
+  if (!target) return new Response("missing u", { status: 400 });
+
+  let mediaUrl: string;
+  try {
+    const u = new URL(target);
+    if (u.protocol !== "https:") return new Response("only https", { status: 400 });
+    mediaUrl = u.toString();
+  } catch {
+    return new Response("bad url", { status: 400 });
+  }
+
+  if (!isAllowedProxyTarget(mediaUrl)) return new Response("forbidden", { status: 403 });
+
+  const headers = new Headers();
+  headers.set("user-agent", SOCIAL_UA);
+  headers.set("accept", "*/*");
+  headers.set("accept-language", "en-US,en;q=0.9");
+  headers.set("referer", "https://www.instagram.com/");
+  headers.set("origin", "https://www.instagram.com");
+
+  const range = req.headers.get("range");
+  if (range) headers.set("range", range);
+
+  const upstream = await fetch(mediaUrl, { method: "GET", headers, redirect: "follow" });
+
+  const ct = upstream.headers.get("content-type") || "";
+  if (
+    upstream.ok &&
+    ct &&
+    !ct.startsWith("video/") &&
+    !ct.startsWith("image/") &&
+    !ct.includes("octet-stream")
+  ) {
+    return new Response("unsupported content-type", { status: 415 });
+  }
+
+  const outHeaders = new Headers(upstream.headers);
+  outHeaders.delete("set-cookie");
+  outHeaders.set("cache-control", "public, max-age=120");
+
+  return new Response(upstream.body, { status: upstream.status, headers: outHeaders });
+}
+
 
 function isInstagramTarget(urlStr: string) {
   try {
@@ -1071,13 +1140,13 @@ function isInstagramTarget(urlStr: string) {
   }
 }
 
-async function handlePublicDownload(tg: Telegram, chatId: number, targetUrl: string, replyTo?: number) {
+async function handlePublicDownload(tg: Telegram, chatId: number, targetUrl: string, origin: string, replyTo?: number) {
   if (isTwitterTarget(targetUrl)) {
     await handleTwitterPublicDownload(tg, chatId, targetUrl, replyTo);
     return;
   }
   if (isInstagramTarget(targetUrl)) {
-    await handleInstagramPublicDownload(tg, chatId, targetUrl, replyTo);
+    await handleInstagramPublicDownload(tg, chatId, targetUrl, origin, replyTo);
     return;
   }
   await tg.sendMessage(chatId, "❌ این لینک پشتیبانی نمی‌شود.", { replyTo });
@@ -1223,7 +1292,7 @@ async function handleTwitterPublicDownload(tg: Telegram, chatId: number, targetU
   const caption = buildTwitterCaption(data);
 
   if (media.kind === "video") {
-    const sent = await tg.sendVideo(chatId, media.url, caption, replyTo);
+    const sent = await tg.sendVideo(chatId, buildProxyUrl(origin, media.url), caption, replyTo);
     if (!sent) {
       // fallback (TG sometimes rejects direct video urls)
       await tg.sendMessage(chatId, `✅ لینک ویدیو:\n${escapeHtml(media.url)}`, { replyTo });
@@ -1231,7 +1300,7 @@ async function handleTwitterPublicDownload(tg: Telegram, chatId: number, targetU
     return;
   }
 
-  await tg.sendPhoto(chatId, media.url, caption, replyTo);
+  await tg.sendPhoto(chatId, buildProxyUrl(origin, media.url), caption, replyTo);
 }
 
 function decodeHtmlEntities(s: string) {
@@ -1450,9 +1519,9 @@ async function tryFetchInstagramEmbed(canonical: string): Promise<InstagramMedia
 }
 
 
-async function handleInstagramPublicDownload(tg: Telegram, chatId: number, targetUrl: string, replyTo?: number) {
-  // روش “Link Expander”: لینک اینستاگرام رو به دامنه‌های embed-friendly تبدیل می‌کنیم
-  // تا تلگرام بتونه preview/inline video رو درست نشون بده (بدون اسکرپ مستقیم اینستاگرام).
+async function handleInstagramPublicDownload(tg: Telegram, chatId: number, targetUrl: string, origin: string, replyTo?: number) {
+  await tg.sendChatAction(chatId, "upload_video");
+
   const info = parseInstagramShortcode(targetUrl);
   if (!info) {
     await tg.sendMessage(chatId, "❌ لینک اینستاگرام قابل تشخیص نبود.", { replyTo });
@@ -1460,15 +1529,37 @@ async function handleInstagramPublicDownload(tg: Telegram, chatId: number, targe
   }
 
   const canonical = `https://www.instagram.com/${info.type}/${info.shortcode}/`;
-  const primary = `https://www.kkinstagram.com/${info.type}/${info.shortcode}/`;
-  const fallback = `https://ddinstagram.com/${info.type}/${info.shortcode}/`;
 
-  await tg.sendMessage(
-    chatId,
-    `✅ لینک قابل نمایش/دانلود در تلگرام:\n${primary}\n\nاگر نمایش نداد:\n${fallback}\n\n(لینک اصلی: ${canonical})`,
-    { replyTo },
-  );
+  // Try JSON first (fast when it works)
+  const jsonMedia = await tryFetchInstagramJson(canonical);
+  const media = jsonMedia || (await tryFetchInstagramEmbed(canonical));
+
+  if (!media) {
+    await tg.sendMessage(
+      chatId,
+      "❌ نتونستم مدیای اینستاگرام رو استخراج کنم. احتمالاً پست خصوصی/محدود شده یا اینستاگرام برای این لینک لاگین می‌خواد.",
+      { replyTo },
+    );
+    return;
+  }
+
+  const caption = escapeHtml(canonical);
+
+  if (media.kind === "video") {
+    const sent = await tg.sendVideo(chatId, buildProxyUrl(origin, media.url), caption, replyTo);
+    if (!sent) {
+      const proxy = buildProxyUrl(origin, media.url);
+      const sentDoc = await tg.sendDocument(chatId, proxy, caption, replyTo);
+      if (!sentDoc) {
+        await tg.sendMessage(chatId, `✅ لینک ویدیو:\n${escapeHtml(media.url)}`, { replyTo });
+      }
+    }
+    return;
+  }
+
+  await tg.sendPhoto(chatId, buildProxyUrl(origin, media.url), caption, replyTo);
 }
+
 
 async function handleCallback(update: any, env: Env, ctx: ExecutionContext, tg: Telegram) {
   const cb = update?.callback_query;
@@ -1540,7 +1631,7 @@ async function handleCallback(update: any, env: Env, ctx: ExecutionContext, tg: 
   }
 }
 
-async function handleMessage(update: any, env: Env, ctx: ExecutionContext, tg: Telegram) {
+async function handleMessage(update: any, env: Env, ctx: ExecutionContext, tg: Telegram, origin: string) {
   const msg = update?.message;
   if (!msg) return;
 
@@ -1575,9 +1666,9 @@ async function handleMessage(update: any, env: Env, ctx: ExecutionContext, tg: T
   cooldownMem.set(userId, now + COOLDOWN_TTL_MS);
   ctx.waitUntil(env.BOT_KV.put(cooldownKey, "1", { expirationTtl: Math.ceil(COOLDOWN_TTL_MS / 1000) }));
 
-  const downloadUrl = pickDownloadUrl(text);
+  const downloadUrl = pickSocialUrl(text);
   if (downloadUrl) {
-    await handlePublicDownload(tg, chatId, downloadUrl, replyTo);
+    await handlePublicDownload(tg, chatId, downloadUrl, origin, replyTo);
     return;
   }
 
@@ -1639,6 +1730,10 @@ export default {
 
     if (url.pathname === "/health") return new Response("ok");
 
+    if (url.pathname === "/proxy") {
+      return handleProxy(req);
+    }
+
     if (url.pathname === "/refresh") {
       const key = url.searchParams.get("key") || "";
       if (!env.ADMIN_KEY || key !== env.ADMIN_KEY) return new Response("Unauthorized", { status: 401 });
@@ -1670,7 +1765,7 @@ export default {
     }
 
     if (update?.message) {
-      ctx.waitUntil(handleMessage(update, env, ctx, tg).catch(() => {}));
+      ctx.waitUntil(handleMessage(update, env, ctx, tg, url.origin).catch(() => {}));
       return new Response("ok");
     }
 
