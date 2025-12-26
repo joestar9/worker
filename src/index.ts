@@ -174,6 +174,76 @@ const CRYPTO_META: Record<string, { emoji: string; fa: string }> = {
   bnb: { emoji: "🟡", fa: "بی‌ان‌بی" },
 };
 
+// -----------------------------
+// Fast string normalization utilities
+// -----------------------------
+
+const DIGIT_MAP: Record<string, string> = {
+  "۰": "0",
+  "۱": "1",
+  "۲": "2",
+  "۳": "3",
+  "۴": "4",
+  "۵": "5",
+  "۶": "6",
+  "۷": "7",
+  "۸": "8",
+  "۹": "9",
+  "٠": "0",
+  "١": "1",
+  "٢": "2",
+  "٣": "3",
+  "٤": "4",
+  "٥": "5",
+  "٦": "6",
+  "٧": "7",
+  "٨": "8",
+  "٩": "9",
+};
+
+function normalizeDigits(input: string) {
+  // Avoid split/map/join allocations.
+  let out = "";
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i];
+    out += DIGIT_MAP[ch] ?? ch;
+  }
+  return out;
+}
+
+function norm(input: string) {
+  return normalizeDigits(input)
+    .replace(/\u200c/g, " ")
+    .replace(/[ي]/g, "ی")
+    .replace(/[ك]/g, "ک")
+    .toLowerCase()
+    .trim();
+}
+
+function stripPunct(input: string) {
+  return input.replace(/[.,!?؟؛:()[\]{}"'«»]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function formatToman(n: number) {
+  const x = Math.round(n);
+  return x.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+function formatUSD(n: number) {
+  if (n < 1) return n.toFixed(4);
+  return n.toLocaleString("en-US", { maximumFractionDigits: 2 });
+}
+
+async function sha256Hex(s: string) {
+  const data = new TextEncoder().encode(s);
+  const hash = await crypto.subtle.digest("SHA-256", data);
+  const bytes = new Uint8Array(hash);
+  let out = "";
+  for (let i = 0; i < bytes.length; i++) out += bytes[i].toString(16).padStart(2, "0");
+  return out;
+}
+
+
 // Aliases used for currency detection in free text.
 const ALIASES: Array<{ keys: string[]; code: string }> = [
   { keys: ["دلار", "دلارامریکا", "دلارآمریکا", "دلار امریکا", "usd", "us dollar", "dollar"], code: "usd" },
@@ -252,74 +322,6 @@ const ALIAS_INDEX: Array<{ code: string; spaced: string[]; compact: string[]; ma
   return mapped;
 })();
 
-// -----------------------------
-// Fast string normalization utilities
-// -----------------------------
-
-const DIGIT_MAP: Record<string, string> = {
-  "۰": "0",
-  "۱": "1",
-  "۲": "2",
-  "۳": "3",
-  "۴": "4",
-  "۵": "5",
-  "۶": "6",
-  "۷": "7",
-  "۸": "8",
-  "۹": "9",
-  "٠": "0",
-  "١": "1",
-  "٢": "2",
-  "٣": "3",
-  "٤": "4",
-  "٥": "5",
-  "٦": "6",
-  "٧": "7",
-  "٨": "8",
-  "٩": "9",
-};
-
-function normalizeDigits(input: string) {
-  // Avoid split/map/join allocations.
-  let out = "";
-  for (let i = 0; i < input.length; i++) {
-    const ch = input[i];
-    out += DIGIT_MAP[ch] ?? ch;
-  }
-  return out;
-}
-
-function norm(input: string) {
-  return normalizeDigits(input)
-    .replace(/\u200c/g, " ")
-    .replace(/[ي]/g, "ی")
-    .replace(/[ك]/g, "ک")
-    .toLowerCase()
-    .trim();
-}
-
-function stripPunct(input: string) {
-  return input.replace(/[.,!?؟؛:()[\]{}"'«»]/g, " ").replace(/\s+/g, " ").trim();
-}
-
-function formatToman(n: number) {
-  const x = Math.round(n);
-  return x.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-}
-
-function formatUSD(n: number) {
-  if (n < 1) return n.toFixed(4);
-  return n.toLocaleString("en-US", { maximumFractionDigits: 2 });
-}
-
-async function sha256Hex(s: string) {
-  const data = new TextEncoder().encode(s);
-  const hash = await crypto.subtle.digest("SHA-256", data);
-  const bytes = new Uint8Array(hash);
-  let out = "";
-  for (let i = 0; i < bytes.length; i++) out += bytes[i].toString(16).padStart(2, "0");
-  return out;
-}
 
 // -----------------------------
 // Downloader helpers
