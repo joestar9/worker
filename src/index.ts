@@ -46,9 +46,6 @@ const COBALT_TIMEOUT_MS_TW = 14_000;
 const COBALT_BACKOFF_BASE_MS = 220;
 const COBALT_BACKOFF_BASE_MS_TW = 320;
 const COBALT_BACKOFF_MAX_MS = 2400;
-const COBALT_HEDGE_CONCURRENCY = 2;
-const COBALT_HEDGE_DELAY_MS = 160;
-const COBALT_HEDGE_DELAY_MS_TW = 260;
 const COBALT_COOLDOWN_429_MS = 20 * 60_000;
 const COBALT_COOLDOWN_403_MS = 25 * 60_000;
 const COBALT_COOLDOWN_5XX_MS = 5 * 60_000;
@@ -528,32 +525,6 @@ class Telegram {
       body.allow_sending_without_reply = true;
     }
     return this.call("sendPhoto", body, false);
-  }
-  sendDocument(chatId: number, fileUrl: string, caption: string, replyTo?: number) {
-    const body: any = { chat_id: chatId, document: fileUrl, caption, parse_mode: "HTML" };
-    if (replyTo) {
-      body.reply_to_message_id = replyTo;
-      body.allow_sending_without_reply = true;
-    }
-    return this.call("sendDocument", body, true);
-  }
-
-  sendAudio(chatId: number, audioUrl: string, caption: string, replyTo?: number) {
-    const body: any = { chat_id: chatId, audio: audioUrl, caption, parse_mode: "HTML" };
-    if (replyTo) {
-      body.reply_to_message_id = replyTo;
-      body.allow_sending_without_reply = true;
-    }
-    return this.call("sendAudio", body, true);
-  }
-
-  sendAnimation(chatId: number, animationUrl: string, caption: string, replyTo?: number) {
-    const body: any = { chat_id: chatId, animation: animationUrl, caption, parse_mode: "HTML" };
-    if (replyTo) {
-      body.reply_to_message_id = replyTo;
-      body.allow_sending_without_reply = true;
-    }
-    return this.call("sendAnimation", body, false);
   }
 }
 
@@ -1152,135 +1123,30 @@ function buildCobaltCaption(sourceUrl: string, captionText: string | null) {
   return truncate(out, MAX_MEDIA_CAPTION_LEN);
 }
 
-function cobaltErrorToText(data: any) {
-  const code = data?.error?.code ?? data?.code ?? data?.text ?? "unknown";
-  const ctx = data?.error?.context;
-  const service = typeof ctx?.service === "string" ? ctx.service : null;
-  const limit = typeof ctx?.limit === "number" ? ctx.limit : null;
-
-  const parts: string[] = [];
-  parts.push(String(code));
-  if (service) parts.push(`service=${service}`);
-  if (limit !== null) parts.push(`limit=${limit}`);
-  return parts.join(" ");
-}
-
-function extFromFilename(name?: string | null) {
-  const f = (name ?? "").trim().toLowerCase();
-  const m = f.match(/\.([a-z0-9]{1,8})$/i);
-  return m ? m[1].toLowerCase() : "";
-}
-
-function pickSendKind(filename?: string | null, mime?: string | null) {
-  const ext = extFromFilename(filename);
-  const mt = (mime ?? "").toLowerCase();
-
-  if (mt.startsWith("video/")) return "video" as const;
-  if (mt.startsWith("image/")) return ext === "gif" ? ("gif" as const) : ("photo" as const);
-  if (mt.startsWith("audio/")) return "audio" as const;
-
-  if (["mp4", "mov", "mkv", "webm"].includes(ext)) return "video" as const;
-  if (["jpg", "jpeg", "png", "webp"].includes(ext)) return "photo" as const;
-  if (["gif"].includes(ext)) return "gif" as const;
-  if (["mp3", "m4a", "aac", "ogg", "opus", "wav", "flac"].includes(ext)) return "audio" as const;
-
-  return "document" as const;
-}
-
-async function sendCobaltFile(
-  tg: Telegram,
-  chatId: number,
-  url: string,
-  filename: string | null | undefined,
-  caption: string,
-  replyTo?: number,
-) {
-  const kind = pickSendKind(filename ?? null, null);
-
-  if (kind === "video") {
-    const ok = await tg.sendVideo(chatId, url, caption, replyTo);
-    if (ok) return true;
-    // بعضی لینک‌ها به عنوان video reject می‌شن؛ document معمولاً همیشه جواب می‌ده
-    await tg.sendDocument(chatId, url, caption, replyTo);
-    return true;
-  }
-
-  if (kind === "photo") {
-    await tg.sendPhoto(chatId, url, caption, replyTo);
-    return true;
-  }
-
-  if (kind === "gif") {
-    await tg.sendAnimation(chatId, url, caption, replyTo);
-    return true;
-  }
-
-  if (kind === "audio") {
-    await tg.sendAudio(chatId, url, caption, replyTo);
-    return true;
-  }
-
-  await tg.sendDocument(chatId, url, caption, replyTo);
-  return true;
-}
-
 async function processCobaltResponse(tg: Telegram, chatId: number, data: any, sourceUrl: string, replyTo?: number) {
-  if (data?.status === "error") {
-    // برای اینکه اینستنس‌های بعدی هم تست بشن، throw می‌کنیم (handleCobalt ادامه می‌ده)
-    throw new Error(cobaltErrorToText(data));
-  }
+  if (data?.status === "error") throw new Error(data.text || "Cobalt Error");
 
   const overallCaptionRaw = extractCobaltCaption(data);
 
-  // v11.x (tunnel/redirect) + سازگاری با قدیمی‌ترها (stream)
-  if (data?.status === "tunnel" || data?.status === "redirect" || data?.status === "stream") {
+  if (data?.status === "stream" || data?.status === "redirect") {
     const cap = buildCobaltCaption(sourceUrl, overallCaptionRaw);
-    const url = String(data.url || "");
-    const filename = typeof data.filename === "string" ? data.filename : null;
-    if (!url) throw new Error("Cobalt: empty url");
-    await sendCobaltFile(tg, chatId, url, filename, cap, replyTo);
-    return;
-  }
-
-  if (data?.status === "local-processing") {
-    const tunnels: string[] = Array.isArray(data?.tunnel) ? data.tunnel.filter((x: any) => typeof x === "string") : [];
-    const outputName = typeof data?.output?.filename === "string" ? data.output.filename : null;
-    const lpType = typeof data?.type === "string" ? data.type : null;
-
-    const linkLines = tunnels.slice(0, 6).map((u) => `• ${u}`);
-    const linksText = linkLines.length ? linkLines.join("\n") : "—";
-
-    const text = [
-      "⚠️ این دانلود نیاز به پردازش محلی دارد (local-processing).",
-      outputName ? `📄 خروجی: <code>${escapeHtml(outputName)}</code>` : null,
-      lpType ? `🧩 نوع: <code>${escapeHtml(lpType)}</code>` : null,
-      "",
-      "لینک‌های تونل:",
-      linksText,
-      "",
-      `🔗 لینک اصلی: ${sourceUrl}`,
-    ]
-      .filter(Boolean)
-      .join("\n");
-
-    await tg.sendMessage(chatId, text, { replyTo });
+    await tg.sendVideo(chatId, data.url, cap, replyTo);
     return;
   }
 
   if (data?.status === "picker" && Array.isArray(data.picker) && data.picker.length > 0) {
-    const items = data.picker.slice(0, 6);
+    const items = data.picker.slice(0, 4);
     for (const item of items) {
-      const itemCapRaw = typeof item?.caption === "string" ? cleanText(item.caption) : null;
+      const itemCapRaw =
+        (typeof item?.caption === "string" && cleanText(item.caption)) ||
+        (typeof item?.description === "string" && cleanText(item.description)) ||
+        (typeof item?.title === "string" && cleanText(item.title)) ||
+        null;
+
       const cap = buildCobaltCaption(sourceUrl, itemCapRaw ?? overallCaptionRaw);
 
-      const url = typeof item?.url === "string" ? item.url : "";
-      if (!url) continue;
-
-      const t = String(item?.type || "");
-      if (t === "video") await tg.sendVideo(chatId, url, cap, replyTo);
-      else if (t === "photo") await tg.sendPhoto(chatId, url, cap, replyTo);
-      else if (t === "gif") await tg.sendAnimation(chatId, url, cap, replyTo);
-      else await tg.sendDocument(chatId, url, cap, replyTo);
+      if (item?.type === "video") await tg.sendVideo(chatId, item.url, cap, replyTo);
+      else if (item?.type === "photo") await tg.sendPhoto(chatId, item.url, cap, replyTo);
     }
     return;
   }
@@ -1316,33 +1182,16 @@ function markCobaltOk(baseUrl: string, now: number) {
   s.lastOkAt = now;
 }
 
-function markCobaltFail(
-  baseUrl: string,
-  now: number,
-  info: { status?: number; timeout?: boolean; cooldownMs?: number; hard?: boolean },
-) {
+function markCobaltFail(baseUrl: string, now: number, info: { status?: number; timeout?: boolean }) {
   const s = getCobaltState(baseUrl, now);
   s.failCount = Math.min(50, (s.failCount || 0) + 1);
-
   const st = info.status ?? 0;
-
-  let cd =
-    typeof info.cooldownMs === "number"
-      ? Math.max(0, info.cooldownMs)
-      : info.timeout
-        ? COBALT_COOLDOWN_TIMEOUT_MS
-        : st === 429
-          ? COBALT_COOLDOWN_429_MS
-          : st === 403
-            ? COBALT_COOLDOWN_403_MS
-            : st >= 500
-              ? COBALT_COOLDOWN_5XX_MS
-              : st === 0
-                ? COBALT_COOLDOWN_TIMEOUT_MS
-                : COBALT_COOLDOWN_OTHER_MS;
-
-  if (info.hard) cd = Math.max(cd, 60 * 60_000); // 1h
-
+  let cd = COBALT_COOLDOWN_OTHER_MS;
+  if (info.timeout) cd = COBALT_COOLDOWN_TIMEOUT_MS;
+  else if (st === 429) cd = COBALT_COOLDOWN_429_MS;
+  else if (st === 403) cd = COBALT_COOLDOWN_403_MS;
+  else if (st >= 500) cd = COBALT_COOLDOWN_5XX_MS;
+  else if (st === 0) cd = COBALT_COOLDOWN_TIMEOUT_MS;
   s.cooldownUntil = Math.max(s.cooldownUntil || 0, now + cd);
 }
 
@@ -1377,126 +1226,341 @@ async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: numbe
   }
 }
 
-function parseRetryAfterMs(res: Response, now: number) {
-  const v = res.headers.get("retry-after");
-  if (!v) return null;
 
-  const asNum = Number(v);
-  if (Number.isFinite(asNum)) return Math.max(0, asNum * 1000);
+// ============================
+// Public, free download helpers (no Cobalt / no API keys)
+// Notes: Works only for PUBLIC posts. If the platform requires login for a specific URL,
+// we cannot fetch the media URL without user-provided auth.
+// ============================
 
-  const asDate = Date.parse(v);
-  if (!Number.isNaN(asDate)) return Math.max(0, asDate - now);
+const SOCIAL_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
 
-  return null;
-}
-
-function parseRateLimitResetMs(res: Response, now: number) {
-  // طبق RateLimit-* draft، RateLimit-Reset معمولاً delta-seconds است
-  const v = res.headers.get("ratelimit-reset") || res.headers.get("x-ratelimit-reset");
-  if (!v) return null;
-
-  const n = Number(v);
-  if (!Number.isFinite(n)) return null;
-
-  // delta-seconds
-  if (n >= 0 && n < 60 * 60 * 24 * 365) return Math.max(0, n * 1000);
-
-  // epoch seconds (برخی سرویس‌ها)
-  const epochMs = n * 1000;
-  if (epochMs > 0) return Math.max(0, epochMs - now);
-
-  return null;
-}
-
-type CobaltAttempt = {
-  ok: boolean;
-  baseUrl: string;
-  now: number;
-  data?: any;
-  status?: number;
-  timeout?: boolean;
-  cooldownMs?: number;
-  hard?: boolean;
-  err?: string;
+const SOCIAL_HEADERS: Record<string, string> = {
+  "user-agent": SOCIAL_UA,
+  accept: "text/html,application/json;q=0.9,*/*;q=0.8",
+  "accept-language": "en-US,en;q=0.9",
 };
 
-async function cobaltTryBase(
-  baseUrl: string,
-  body: string,
-  timeoutMs: number,
-  ac: AbortController,
-): Promise<CobaltAttempt> {
-  const endpoint = baseUrl.replace(/\/+$/, "");
-  const startedAt = Date.now();
-
-  const t = setTimeout(() => ac.abort(), timeoutMs);
-
+function isInstagramTarget(urlStr: string) {
   try {
-    const res = await fetch(endpoint, { method: "POST", headers: COBALT_HEADERS, body, signal: ac.signal });
-    clearTimeout(t);
-
-    const ct = (res.headers.get("content-type") || "").toLowerCase();
-
-    // bot-protection / challenge معمولاً HTML برمی‌گردونه
-    if (ct.includes("text/html")) {
-      return {
-        ok: false,
-        baseUrl,
-        now: Date.now(),
-        status: res.status || 0,
-        cooldownMs: 60 * 60_000,
-        hard: true,
-        err: "html/bot-protection",
-      };
-    }
-
-    if (!res.ok) {
-      const now2 = Date.now();
-      const retryAfterMs = res.status === 429 ? parseRetryAfterMs(res, now2) : null;
-      const resetMs = res.status === 429 ? parseRateLimitResetMs(res, now2) : null;
-      const cd = retryAfterMs ?? resetMs ?? undefined;
-
-      return {
-        ok: false,
-        baseUrl,
-        now: now2,
-        status: res.status,
-        cooldownMs: cd,
-        err: `http:${res.status}`,
-      };
-    }
-
-    let data: any;
-    try {
-      data = await res.json<any>();
-    } catch {
-      return { ok: false, baseUrl, now: Date.now(), status: 0, err: "json-parse" };
-    }
-
-    if (data?.status === "error") {
-      const msg = cobaltErrorToText(data);
-      const code = data?.error?.code;
-      const hard = code === "api.auth..missing" || code === "api.auth..invalid";
-      return { ok: false, baseUrl, now: Date.now(), status: 200, hard, err: msg };
-    }
-
-    return { ok: true, baseUrl, now: Date.now(), data, status: 200 };
-  } catch (e: any) {
-    clearTimeout(t);
-    const msg = (String(e?.name ?? "") + ":" + String(e?.message ?? e)).toLowerCase();
-    const isTimeout = msg.includes("abort") || msg.includes("timeout");
-    return {
-      ok: false,
-      baseUrl,
-      now: Date.now(),
-      status: 0,
-      timeout: isTimeout,
-      err: isTimeout ? "timeout" : "fetch",
-    };
-  } finally {
-    void startedAt;
+    const u = new URL(urlStr);
+    const h = u.hostname.toLowerCase();
+    return h === "instagram.com" || h.endsWith(".instagram.com");
+  } catch {
+    return false;
   }
 }
+
+async function handlePublicDownload(tg: Telegram, chatId: number, targetUrl: string, replyTo?: number) {
+  if (isTwitterTarget(targetUrl)) {
+    await handleTwitterPublicDownload(tg, chatId, targetUrl, replyTo);
+    return;
+  }
+  if (isInstagramTarget(targetUrl)) {
+    await handleInstagramPublicDownload(tg, chatId, targetUrl, replyTo);
+    return;
+  }
+  await tg.sendMessage(chatId, "❌ این لینک پشتیبانی نمی‌شود.", { replyTo });
+}
+
+async function resolveFinalUrlIfShortened(urlStr: string, maxHops = 2): Promise<string> {
+  let current = urlStr;
+  for (let i = 0; i < maxHops; i++) {
+    let u: URL;
+    try {
+      u = new URL(current);
+    } catch {
+      return current;
+    }
+    const h = u.hostname.toLowerCase();
+    if (h !== "t.co") return current;
+
+    // Follow redirect (Cloudflare fetch will follow by default). We use GET to ensure we get final url.
+    const res = await fetch(current, { method: "GET", redirect: "follow", headers: SOCIAL_HEADERS });
+    // If it fails, keep current
+    if (!res.ok) return current;
+    const finalUrl = (res as any).url || current;
+    if (finalUrl === current) return current;
+    current = finalUrl;
+  }
+  return current;
+}
+
+function extractTweetId(urlStr: string): string | null {
+  try {
+    const u = new URL(urlStr);
+    // allow alternative frontends too (fxtwitter/vxtwitter/fixupx etc.)
+    const m = u.pathname.match(/\/status\/(\d+)/i);
+    if (m?.[1]) return m[1];
+    // Sometimes query contains id
+    const qid = u.searchParams.get("id");
+    if (qid && /^\d+$/.test(qid)) return qid;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function pickBestMp4Variant(variants: any[] | undefined | null): string | null {
+  if (!Array.isArray(variants) || variants.length === 0) return null;
+  let best: { url: string; bitrate: number } | null = null;
+  for (const v of variants) {
+    const ct = typeof v?.content_type === "string" ? v.content_type : "";
+    const url = typeof v?.url === "string" ? v.url : "";
+    const br = typeof v?.bitrate === "number" ? v.bitrate : -1;
+    if (!url) continue;
+    // prefer mp4
+    if (ct.includes("video/mp4")) {
+      if (!best || br > best.bitrate) best = { url, bitrate: br };
+    }
+  }
+  return best?.url ?? null;
+}
+
+type TwitterMedia =
+  | { kind: "video"; url: string }
+  | { kind: "photo"; url: string };
+
+function pickTwitterMedia(data: any): TwitterMedia | null {
+  const mediaDetails = Array.isArray(data?.mediaDetails) ? data.mediaDetails : [];
+  // Prefer video if present
+  for (const m of mediaDetails) {
+    const type = typeof m?.type === "string" ? m.type : "";
+    if (type === "video" || type === "animated_gif") {
+      const url =
+        pickBestMp4Variant(m?.video_info?.variants) ||
+        pickBestMp4Variant(m?.videoInfo?.variants) ||
+        null;
+      if (url) return { kind: "video", url };
+    }
+  }
+  // Photos
+  for (const m of mediaDetails) {
+    const type = typeof m?.type === "string" ? m.type : "";
+    if (type === "photo") {
+      const url = (typeof m?.media_url_https === "string" && m.media_url_https) || (typeof m?.mediaUrlHttps === "string" && m.mediaUrlHttps) || "";
+      if (url) return { kind: "photo", url };
+    }
+  }
+  // Some responses include `photos` array with `url`
+  const photos = Array.isArray(data?.photos) ? data.photos : [];
+  if (photos[0]?.url) return { kind: "photo", url: String(photos[0].url) };
+
+  return null;
+}
+
+function buildTwitterCaption(data: any): string {
+  const user = data?.user?.screen_name ? `@${String(data.user.screen_name)}` : "";
+  const text = typeof data?.text === "string" ? data.text : "";
+  const t = cleanText(text).slice(0, 700); // keep caption short for TG
+  const parts = [user, t].filter(Boolean);
+  return escapeHtml(parts.join("\n"));
+}
+
+async function fetchTweetResult(tweetId: string): Promise<any | null> {
+  // Undocumented but widely used by the official embed flow; may be flaky.
+  // We try a couple random tokens (some endpoints return 200 + empty body randomly).
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const token = String(Math.floor(Math.random() * 1e12));
+    const url = `https://cdn.syndication.twimg.com/tweet-result?id=${tweetId}&token=${token}&lang=en`;
+    const res = await fetch(url, { method: "GET", headers: { ...SOCIAL_HEADERS, accept: "application/json" } });
+    if (!res.ok) continue;
+    const txt = await res.text().catch(() => "");
+    if (!txt || txt.trim().length < 5) continue;
+    try {
+      return JSON.parse(txt);
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+async function handleTwitterPublicDownload(tg: Telegram, chatId: number, targetUrl: string, replyTo?: number) {
+  await tg.sendChatAction(chatId, "upload_video");
+
+  const finalUrl = await resolveFinalUrlIfShortened(targetUrl);
+  const tweetId = extractTweetId(finalUrl);
+  if (!tweetId) {
+    await tg.sendMessage(chatId, "❌ نتونستم شناسه توییت رو از لینک پیدا کنم.", { replyTo });
+    return;
+  }
+
+  const data = await fetchTweetResult(tweetId);
+  if (!data) {
+    await tg.sendMessage(chatId, "❌ دریافت اطلاعات توییت ناموفق بود (ممکنه لینک خصوصی/حذف شده باشه یا سرویس موقتاً محدود شده باشه).", {
+      replyTo,
+    });
+    return;
+  }
+
+  const media = pickTwitterMedia(data);
+  if (!media) {
+    await tg.sendMessage(chatId, "❌ توی این توییت مدیای قابل دانلود پیدا نشد.", { replyTo });
+    return;
+  }
+
+  const caption = buildTwitterCaption(data);
+
+  if (media.kind === "video") {
+    const sent = await tg.sendVideo(chatId, media.url, caption, replyTo);
+    if (!sent) {
+      // fallback (TG sometimes rejects direct video urls)
+      await tg.sendMessage(chatId, `✅ لینک ویدیو:\n${escapeHtml(media.url)}`, { replyTo });
+    }
+    return;
+  }
+
+  await tg.sendPhoto(chatId, media.url, caption, replyTo);
+}
+
+function decodeHtmlEntities(s: string) {
+  return s
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+}
+
+function firstMetaContent(html: string, propertyOrName: string): string | null {
+  // matches: <meta property="og:video" content="...">
+  const re = new RegExp(`<meta\\s+(?:property|name)="${propertyOrName.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&")}"\\s+content="([^"]+)"`, "i");
+  const m = html.match(re);
+  if (!m?.[1]) return null;
+  return decodeHtmlEntities(m[1]);
+}
+
+type InstagramMedia =
+  | { kind: "video"; url: string; thumb?: string }
+  | { kind: "photo"; url: string };
+
+function parseInstagramShortcode(urlStr: string): { type: "p" | "reel" | "tv"; shortcode: string } | null {
+  try {
+    const u = new URL(urlStr);
+    const p = u.pathname.replace(/\/+$/, "");
+    const m = p.match(/^\/(p|reel|tv)\/([A-Za-z0-9_-]+)/);
+    if (!m) return null;
+    const type = m[1] as "p" | "reel" | "tv";
+    const shortcode = m[2];
+    return { type, shortcode };
+  } catch {
+    return null;
+  }
+}
+
+function pickInstagramFromGraphql(node: any): InstagramMedia | null {
+  if (!node) return null;
+
+  // carousel
+  const edges = node?.edge_sidecar_to_children?.edges;
+  if (Array.isArray(edges) && edges.length > 0) {
+    return pickInstagramFromGraphql(edges[0]?.node);
+  }
+
+  const isVideo = Boolean(node?.is_video);
+  if (isVideo && typeof node?.video_url === "string" && node.video_url) {
+    const thumb = typeof node?.display_url === "string" ? node.display_url : undefined;
+    return { kind: "video", url: node.video_url, thumb };
+  }
+
+  if (typeof node?.display_url === "string" && node.display_url) {
+    return { kind: "photo", url: node.display_url };
+  }
+
+  return null;
+}
+
+async function tryFetchInstagramJson(canonical: string): Promise<InstagramMedia | null> {
+  const url = `${canonical}?__a=1&__d=dis`;
+  const res = await fetch(url, { method: "GET", headers: { ...SOCIAL_HEADERS, accept: "application/json" } });
+  if (!res.ok) return null;
+  const ct = res.headers.get("content-type") || "";
+  if (!ct.includes("json")) return null;
+  const data = await res.json().catch(() => null);
+  if (!data) return null;
+
+  // Old-ish shape: graphql.shortcode_media
+  const node = data?.graphql?.shortcode_media;
+  const fromGraphql = pickInstagramFromGraphql(node);
+  if (fromGraphql) return fromGraphql;
+
+  // Some shapes: items[0]
+  const item = Array.isArray(data?.items) ? data.items[0] : null;
+  if (item) {
+    const videoUrl =
+      (typeof item?.video_versions?.[0]?.url === "string" && item.video_versions[0].url) ||
+      (typeof item?.video_url === "string" && item.video_url) ||
+      "";
+    if (videoUrl) return { kind: "video", url: videoUrl };
+
+    const imgUrl =
+      (typeof item?.image_versions2?.candidates?.[0]?.url === "string" && item.image_versions2.candidates[0].url) ||
+      (typeof item?.display_url === "string" && item.display_url) ||
+      "";
+    if (imgUrl) return { kind: "photo", url: imgUrl };
+  }
+
+  return null;
+}
+
+async function tryFetchInstagramEmbed(canonical: string): Promise<InstagramMedia | null> {
+  const url = `${canonical}embed/`;
+  const res = await fetch(url, { method: "GET", headers: SOCIAL_HEADERS });
+  if (!res.ok) return null;
+  const html = await res.text().catch(() => "");
+  if (!html) return null;
+
+  const ogVideo = firstMetaContent(html, "og:video") || firstMetaContent(html, "og:video:secure_url");
+  if (ogVideo) {
+    const ogImage = firstMetaContent(html, "og:image") || undefined;
+    return { kind: "video", url: ogVideo, thumb: ogImage };
+  }
+
+  const ogImage = firstMetaContent(html, "og:image");
+  if (ogImage) return { kind: "photo", url: ogImage };
+
+  return null;
+}
+
+async function handleInstagramPublicDownload(tg: Telegram, chatId: number, targetUrl: string, replyTo?: number) {
+  await tg.sendChatAction(chatId, "upload_video");
+
+  const info = parseInstagramShortcode(targetUrl);
+  if (!info) {
+    await tg.sendMessage(chatId, "❌ لینک اینستاگرام قابل تشخیص نبود.", { replyTo });
+    return;
+  }
+
+  const canonical = `https://www.instagram.com/${info.type}/${info.shortcode}/`;
+
+  // Try JSON first (fast when it works)
+  const jsonMedia = await tryFetchInstagramJson(canonical);
+  const media = jsonMedia || (await tryFetchInstagramEmbed(canonical));
+
+  if (!media) {
+    await tg.sendMessage(
+      chatId,
+      "❌ نتونستم مدیای اینستاگرام رو استخراج کنم. احتمالاً پست خصوصی/محدود شده یا اینستاگرام برای این لینک لاگین می‌خواد.",
+      { replyTo },
+    );
+    return;
+  }
+
+  const caption = escapeHtml(canonical);
+
+  if (media.kind === "video") {
+    const sent = await tg.sendVideo(chatId, media.url, caption, replyTo);
+    if (!sent) {
+      await tg.sendMessage(chatId, `✅ لینک ویدیو:\n${escapeHtml(media.url)}`, { replyTo });
+    }
+    return;
+  }
+
+  await tg.sendPhoto(chatId, media.url, caption, replyTo);
+}
+
 
 async function handleCobalt(tg: Telegram, chatId: number, targetUrl: string, replyTo?: number) {
   await tg.sendChatAction(chatId, "upload_video");
@@ -1507,133 +1571,70 @@ async function handleCobalt(tg: Telegram, chatId: number, targetUrl: string, rep
   const isTw = isTwitterTarget(targetUrl);
   const timeoutMs = isTw ? COBALT_TIMEOUT_MS_TW : COBALT_TIMEOUT_MS;
   const baseDelay = isTw ? COBALT_BACKOFF_BASE_MS_TW : COBALT_BACKOFF_BASE_MS;
-  const hedgeDelay = isTw ? COBALT_HEDGE_DELAY_MS_TW : COBALT_HEDGE_DELAY_MS;
 
   const bases = sortCobaltBases([...COBALT_INSTANCES], now);
 
-  // طبق داک: POST / + schema جدید
-  const body = JSON.stringify({
-    url: targetUrl,
-    downloadMode: "auto",
-    filenameStyle: "basic",
-    videoQuality: "1080",
-    localProcessing: "disabled",
-    youtubeVideoCodec: "h264",
-    youtubeVideoContainer: "auto",
-    convertGif: true,
-    allowH265: false,
-  });
+  const endpointsForBase = (baseUrl: string) => {
+    const base = baseUrl.replace(/\/+$/, "");
+    return [base, `${base}/api/json`];
+  };
 
-  let attemptRound = 0;
-  let lastErr: string | null = null;
+  let attempt = 0;
 
-  let idx = 0;
-  while (idx < bases.length) {
-    // انتخاب 1-2 اینستنس (با رد کردن cooldownهای فعال)
-    let base1: string | null = null;
-    while (idx < bases.length && !base1) {
-      const b = bases[idx++];
-      const s = getCobaltState(b, Date.now());
-      if (s.cooldownUntil > Date.now()) continue;
-      base1 = b;
-    }
-    if (!base1) break;
+  for (const baseUrl of bases) {
+    const s = getCobaltState(baseUrl, Date.now());
+    const endpoints = endpointsForBase(baseUrl);
 
-    let base2: string | null = null;
-    while (idx < bases.length && !base2) {
-      const b = bases[idx++];
-      const s = getCobaltState(b, Date.now());
-      if (s.cooldownUntil > Date.now()) continue;
-      base2 = b;
-    }
-
-    if (attemptRound > 0) {
-      const jitter = Math.floor(Math.random() * 180);
-      const step = Math.min(COBALT_BACKOFF_MAX_MS, baseDelay * attemptRound);
-      const extra = Math.min(800, (getCobaltState(base1, Date.now()).failCount || 0) * 20);
-      await sleep(step + jitter + extra);
-    }
-    attemptRound++;
-
-    const ac1 = new AbortController();
-    const p1 = cobaltTryBase(base1, body, timeoutMs, ac1);
-
-    let ac2: AbortController | null = null;
-    let p2: Promise<CobaltAttempt> | null = null;
-
-    if (base2) {
-      await sleep(hedgeDelay);
-      ac2 = new AbortController();
-      p2 = cobaltTryBase(base2, body, timeoutMs, ac2);
-      // جلوگیری از unhandled rejection اگر زودتر برگشتیم
-      p2.catch(() => null);
-    }
-
-    const first = await Promise.race([p1, p2 ?? p1]);
-
-    const tryProcess = async (r: CobaltAttempt) => {
-      try {
-        await processCobaltResponse(tg, chatId, r.data, targetUrl, replyTo);
-        markCobaltOk(r.baseUrl, Date.now());
-        return true;
-      } catch (e: any) {
-        lastErr = String(e?.message ?? e);
-        markCobaltFail(r.baseUrl, Date.now(), { status: 200 });
-        return false;
+    for (const endpoint of endpoints) {
+      const now2 = Date.now();
+      if (attempt > 0) {
+        const jitter = Math.floor(Math.random() * 180);
+        const step = Math.min(COBALT_BACKOFF_MAX_MS, baseDelay * attempt);
+        const extra = Math.min(800, (s.failCount || 0) * 20);
+        await sleep(step + jitter + extra);
       }
-    };
+      attempt++;
 
-    if (first.ok) {
-      // abort کردن درخواست کندتر
-      if (first.baseUrl === base1 && ac2) {
-        try { ac2.abort(); } catch {}
-      } else {
-        try { ac1.abort(); } catch {}
-      }
+      const body = JSON.stringify({ url: targetUrl, vCodec: "h264" });
 
-      if (await tryProcess(first)) return true;
-      continue;
-    }
+      const { res, timeout } = await fetchWithTimeout(
+        endpoint,
+        { method: "POST", headers: COBALT_HEADERS, body },
+        timeoutMs,
+      );
 
-    // fail اول
-    if (first.err) lastErr = first.err;
-    markCobaltFail(first.baseUrl, first.now, {
-      status: first.status,
-      timeout: first.timeout,
-      cooldownMs: first.cooldownMs,
-      hard: first.hard,
-    });
-
-    // تلاش دوم (اگر داریم)
-    if (p2) {
-      const second = await (first.baseUrl === base1 ? p2 : p1);
-
-      if (second.ok) {
-        // abort کردن اون یکی
-        if (second.baseUrl === base1 && ac2) {
-          try { ac2.abort(); } catch {}
-        } else {
-          try { ac1.abort(); } catch {}
-        }
-
-        if (await tryProcess(second)) return true;
+      if (!res) {
+        markCobaltFail(baseUrl, Date.now(), { timeout: true });
         continue;
       }
 
-      if (second.err) lastErr = second.err;
-      markCobaltFail(second.baseUrl, second.now, {
-        status: second.status,
-        timeout: second.timeout,
-        cooldownMs: second.cooldownMs,
-        hard: second.hard,
-      });
+      if (!res.ok) {
+        markCobaltFail(baseUrl, Date.now(), { status: res.status });
+        continue;
+      }
+
+      let data: any = null;
+      try {
+        data = await res.json<any>();
+      } catch {
+        markCobaltFail(baseUrl, Date.now(), { status: 0 });
+        continue;
+      }
+
+      try {
+        await processCobaltResponse(tg, chatId, data, targetUrl, replyTo);
+        markCobaltOk(baseUrl, Date.now());
+        return true;
+      } catch (e: any) {
+        const st = typeof (data as any)?.statusCode === "number" ? (data as any).statusCode : undefined;
+        markCobaltFail(baseUrl, Date.now(), { status: st ?? 0, timeout: false });
+        void e;
+        continue;
+      }
     }
   }
 
-  const tail = lastErr ? `\n<code>${escapeHtml(lastErr)}</code>` : "";
-  await tg.sendMessage(chatId, `❌ دانلود انجام نشد. (ممکن است اینستنس‌ها بلاک/ریت‌لیمیت باشند یا لینک قابل پردازش نباشد.)${tail}`, {
-    replyTo,
-  });
+  await tg.sendMessage(chatId, `❌ سرورهای دانلود پاسخگو نیستند. لطفاً دقایقی دیگر تلاش کنید.`, { replyTo });
   return true;
 }
 
@@ -1742,9 +1743,9 @@ async function handleMessage(update: any, env: Env, ctx: ExecutionContext, tg: T
   cooldownMem.set(userId, now + COOLDOWN_TTL_MS);
   ctx.waitUntil(env.BOT_KV.put(cooldownKey, "1", { expirationTtl: Math.ceil(COOLDOWN_TTL_MS / 1000) }));
 
-  const cobaltUrl = pickCobaltUrl(text);
-  if (cobaltUrl) {
-    await handleCobalt(tg, chatId, cobaltUrl, replyTo);
+  const downloadUrl = pickCobaltUrl(text);
+  if (downloadUrl) {
+    await handlePublicDownload(tg, chatId, downloadUrl, replyTo);
     return;
   }
 
