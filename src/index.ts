@@ -520,6 +520,10 @@ async function fetchFixerHtmlMedia(tweetId: string): Promise<TwitterMediaItem[]>
   return [];
 }
 
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 async function resolveFinalUrl(url: string): Promise<string> {
   try {
     const r = await fetchWithRetry(url, { method: "GET", redirect: "follow" }, 2, 200);
@@ -554,57 +558,11 @@ function extractTweetScreenName(url: string): string | null {
   }
 }
 
-function buildFixTweetApiCandidates(screenName: string, tweetId: string): string[] {
-  // FixTweet API endpoint format:
-  // https://api.fxtwitter.com/:screen_name?/status/:id/:translate_to?
-  // vxtwitter commonly exposes a similar status JSON endpoint via api.vxtwitter.com.
-  const s = screenName || "_";
-  const id = tweetId;
-  return [
-    `https://api.fxtwitter.com/${encodeURIComponent(s)}/status/${encodeURIComponent(id)}`,
-    `https://api.fxtwitter.com/status/${encodeURIComponent(id)}`,
-    `https://api.vxtwitter.com/${encodeURIComponent(s)}/status/${encodeURIComponent(id)}`,
-    `https://api.vxtwitter.com/status/${encodeURIComponent(id)}`,
-  ];
-}
 
-function parseFixTweetApiMedia(d: unknown): TwitterMediaItem[] {
-  const out: TwitterMediaItem[] = [];
-  if (!d || typeof d !== "object") return out;
-  const anyD: any = d as any;
-
-  // FixTweet/FxEmbed style: { code, message, tweet: { media: { photos?:[], videos?:[], external?:{} } } }
-  const tweet = anyD.tweet ?? anyD.status ?? anyD.data ?? null;
-  const media = tweet?.media ?? tweet?.extended_entities?.media ?? null;
-
-  const photos: any[] | undefined = media?.photos;
-  if (Array.isArray(photos)) {
-    for (const p of photos) {
-      const url = p?.url;
-      if (typeof url === "string") out.push({ type: "photo", url: url.includes("?") ? url : `${url}?name=orig` });
-    }
-  }
-
-  const videos: any[] | undefined = media?.videos;
-  if (Array.isArray(videos)) {
-    for (const v of videos) {
-      const url = v?.url;
-      if (typeof url === "string") out.push({ type: "video", url });
-    }
-  }
-
-  // Some deployments may expose a single external video
-  const externalUrl = media?.external?.url;
-  if (out.length === 0 && typeof externalUrl === "string") out.push({ type: "video", url: externalUrl });
-
-  return out;
-}
 
 function parseTwitterMediaAny(d: unknown): TwitterMediaItem[] {
-  // Try syndication shape first, then FixTweet API shape
-  const s = parseTwitterSyndicationMedia(d);
-  if (s.length) return s;
-  return parseFixTweetApiMedia(d);
+  // Syndication-only (no third-party JSON APIs)
+  return parseTwitterSyndicationMedia(d);
 }
 
 function pickBestMp4Variant(variants: any[] | undefined): string | null {
@@ -710,14 +668,17 @@ async function handleTwitterSyndicationDownload(env: Env, chatId: number, target
     return true;
   }
 
-  const endpoints = [
-    `https://cdn.syndication.twimg.com/tweet-result?id=${tweetId}&lang=en`,
-    `https://cdn.syndication.twimg.com/tweet-result?id=${tweetId}`,
-  ];
 
-  let data: unknown = null;
-  let lastStatus = 0;
+const endpoints = [
+  `https://cdn.syndication.twimg.com/tweet-result?id=${tweetId}&lang=en`,
+  `https://cdn.syndication.twimg.com/tweet-result?id=${tweetId}`,
+];
 
+let data: unknown = null;
+let lastStatus = 0;
+
+// Try a few rounds before giving up (temporary rate limits / flakiness are common)
+for (let round = 0; round < 3 && !data; round++) {
   for (const apiUrl of endpoints) {
     try {
       const res = await fetchWithRetry(
@@ -742,35 +703,10 @@ async function handleTwitterSyndicationDownload(env: Env, chatId: number, target
     } catch {}
   }
 
-  // 4) Fallback #2: Try FixTweet-compatible public APIs (no Cobalt)
-  // These are commonly used by downloader bots and embed fixers.
-  if (!data) {
-    const screenName = extractTweetScreenName(resolvedUrl) || "_";
-    const apiCandidates = buildFixTweetApiCandidates(screenName, tweetId);
-
-    for (const apiUrl of apiCandidates) {
-      try {
-        const res = await fetchWithRetry(
-          apiUrl,
-          {
-            method: "GET",
-            headers: {
-              "user-agent": TW_HTML_HEADERS["user-agent"],
-              accept: "application/json,text/plain,*/*",
-            },
-            cf: { cacheTtl: 180, cacheEverything: true },
-          } as any,
-          3,
-          350,
-        );
-
-        lastStatus = res.status;
-        if (!res.ok) continue;
-        data = await res.json();
-        break;
-      } catch {}
-    }
+  if (!data && round < 2) {
+    await sleepMs(250 * (2 ** round));
   }
+}
 
   if (!data) {
     // common reasons: private tweet / deleted / region-locked / temporary block
@@ -784,19 +720,91 @@ async function handleTwitterSyndicationDownload(env: Env, chatId: number, target
     return true;
   }
 
-  // If data is from FixTweet-compatible APIs, parse accordingly.
+  // Parse media from syndication payload.
   const items = parseTwitterMediaAny(data).slice(0, 10);
 
-  if (items.length === 0) {
-    // Fallback #3: scrape embed-fixer HTML meta tags (og:video / twitter:player:stream)
-    const fixerItems = await fetchFixerHtmlMedia(tweetId);
-    if (fixerItems.length) {
-      if (fixerItems.length === 1) {
-        const it = fixerItems[0];
-        if (it.type === 'video') await tgSendVideo(env, chatId, it.url, '', replyTo);
-        else await tgSendPhoto(env, chatId, it.url, '', replyTo);
-        return true;
-      }
+if (items.length === 0) {
+
+
+  // Fallback: scrape embed-fixer HTML meta tags (og:video / twitter:player:stream).
+
+
+  // Retry a few times because these sources can be flaky / temporarily rate-limited.
+
+
+  let fixerItems: TwitterMediaItem[] = [];
+
+
+  for (let round = 0; round < 3 && fixerItems.length === 0; round++) {
+
+
+    fixerItems = await fetchFixerHtmlMedia(tweetId);
+
+
+    if (fixerItems.length === 0 && round < 2) await sleepMs(250 * (2 ** round));
+
+
+  }
+
+
+  if (fixerItems.length) {
+
+
+    if (fixerItems.length === 1) {
+
+
+      const it = fixerItems[0];
+
+
+      if (it.type === 'video') await tgSendVideo(env, chatId, it.url, '', replyTo);
+
+
+      else await tgSendPhoto(env, chatId, it.url, '', replyTo);
+
+
+      return true;
+
+
+    }
+
+
+
+
+
+    await tgSendMediaGroup(
+
+
+      env,
+
+
+      chatId,
+
+
+      fixerItems.slice(0, 10).map((it) => ({ type: it.type, media: it.url })),
+
+
+      replyTo,
+
+
+    );
+
+
+    return true;
+
+
+  }
+
+
+
+
+
+  await tgSend(env, chatId, '❌ این توییت مدیا قابل دانلود نداره یا محدود شده.', replyTo);
+
+
+  return true;
+
+
+}
 
       await tgSendMediaGroup(
         env,
@@ -2044,5 +2052,3 @@ function computeDefaultListsFromRates(rates: Record<string, Rate>): { fiat: stri
 
   return { fiat: [...goldCodes, ...currencyCodes], crypto: cryptoCodes };
 }
-
-
