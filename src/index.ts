@@ -1973,5 +1973,3 @@ function computeDefaultListsFromRates(rates: Record<string, Rate>): { fiat: stri
 
   return { fiat: [...goldCodes, ...currencyCodes], crypto: cryptoCodes };
 }
-
-
