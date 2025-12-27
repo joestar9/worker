@@ -468,6 +468,58 @@ function extractTweetIdFromHtml(html: string): string | null {
   return null;
 }
 
+function extractMetaContent(html: string, key: string): string | null {
+  // key may be like 'og:video' or 'twitter:image'
+  const reProp = new RegExp(`property=["']${key.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&')}["'][^>]*content=["']([^"']+)["']`, 'i');
+  const m1 = html.match(reProp);
+  if (m1?.[1]) return m1[1];
+
+  const reName = new RegExp(`name=["']${key.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&')}["'][^>]*content=["']([^"']+)["']`, 'i');
+  const m2 = html.match(reName);
+  if (m2?.[1]) return m2[1];
+  return null;
+}
+
+function parseFixerHtmlMedia(html: string): TwitterMediaItem[] {
+  // Many embed-fixer pages expose direct MP4 via og:video or twitter:player:stream
+  const video =
+    extractMetaContent(html, 'og:video') ||
+    extractMetaContent(html, 'og:video:url') ||
+    extractMetaContent(html, 'twitter:player:stream') ||
+    extractMetaContent(html, 'twitter:player:stream:url');
+
+  if (video && /\.(mp4)(\?|$)/i.test(video)) return [{ type: 'video', url: video }];
+
+  const img = extractMetaContent(html, 'og:image') || extractMetaContent(html, 'twitter:image');
+  if (img) return [{ type: 'photo', url: img.includes('?') ? img : `${img}?name=orig` }];
+
+  return [];
+}
+
+async function fetchFixerHtmlMedia(tweetId: string): Promise<TwitterMediaItem[]> {
+  // These domains are commonly used for embedding/downloading tweets.
+  const bases = [
+    'https://fixupx.com/i/status/',
+    'https://vxtwitter.com/i/status/',
+    'https://fxtwitter.com/i/status/',
+    'https://xtwitter.com/i/status/',
+  ];
+
+  for (const b of bases) {
+    const url = `${b}${encodeURIComponent(tweetId)}`;
+    try {
+      const res = await fetchWithRetry(url, { method: 'GET', redirect: 'follow', headers: TW_HTML_HEADERS }, 2, 250);
+      if (!res.ok) continue;
+      const html = await res.text();
+      const items = parseFixerHtmlMedia(html);
+      if (items.length) return items;
+    } catch {
+      // ignore and try next
+    }
+  }
+  return [];
+}
+
 async function resolveFinalUrl(url: string): Promise<string> {
   try {
     const r = await fetchWithRetry(url, { method: "GET", redirect: "follow" }, 2, 200);
@@ -736,7 +788,26 @@ async function handleTwitterSyndicationDownload(env: Env, chatId: number, target
   const items = parseTwitterMediaAny(data).slice(0, 10);
 
   if (items.length === 0) {
-    await tgSend(env, chatId, "❌ این توییت مدیا قابل دانلود نداره یا محدود شده.", replyTo);
+    // Fallback #3: scrape embed-fixer HTML meta tags (og:video / twitter:player:stream)
+    const fixerItems = await fetchFixerHtmlMedia(tweetId);
+    if (fixerItems.length) {
+      if (fixerItems.length === 1) {
+        const it = fixerItems[0];
+        if (it.type === 'video') await tgSendVideo(env, chatId, it.url, '', replyTo);
+        else await tgSendPhoto(env, chatId, it.url, '', replyTo);
+        return true;
+      }
+
+      await tgSendMediaGroup(
+        env,
+        chatId,
+        fixerItems.slice(0, 10).map((it) => ({ type: it.type, media: it.url })),
+        replyTo,
+      );
+      return true;
+    }
+
+    await tgSend(env, chatId, '❌ این توییت مدیا قابل دانلود نداره یا محدود شده.', replyTo);
     return true;
   }
 
@@ -1973,3 +2044,5 @@ function computeDefaultListsFromRates(rates: Record<string, Rate>): { fiat: stri
 
   return { fiat: [...goldCodes, ...currencyCodes], crypto: cryptoCodes };
 }
+
+
