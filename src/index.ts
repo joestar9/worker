@@ -43,11 +43,8 @@ const COBALT_HEADERS = {
   Referer: "https://cobalt.tools/",
 } as const;
 
-const KEY_RATES = "rates:v2:latest";
-const KEY_HASH = "rates:v2:hash";
-
-const KEY_ETAG = "rates:v2:etag";
-const KEY_REFRESH_STATUS = "rates:v2:refresh_status";
+const PRICES_CACHE_TTL_SECONDS = 15 * 60; // caches.default TTL per PoP
+const PRICES_CACHE_KEY = new Request(PRICES_JSON_URL, { method: "GET" });
 
 const RATES_CACHE_TTL_MS = 60_000; // memory cache per isolate
 const STALE_REFRESH_MS = 35 * 60_000;
@@ -118,6 +115,9 @@ type Stored = {
   source: string;
   timestamp?: string;
   rates: Record<string, Rate>;
+  // Precomputed in GitHub Actions to reduce Worker CPU
+  aliasIndex: Record<string, string>;
+  lists: { fiat: string[]; crypto: string[] };
 };
 
 // -----------------------------
@@ -253,19 +253,9 @@ function formatUSD(n: number) {
   return n.toLocaleString("en-US", { maximumFractionDigits: 2 });
 }
 
-async function sha256Hex(s: string) {
-  const data = new TextEncoder().encode(s);
-  const hash = await crypto.subtle.digest("SHA-256", data);
-  const bytes = new Uint8Array(hash);
-  let out = "";
-  for (let i = 0; i < bytes.length; i++) out += bytes[i].toString(16).padStart(2, "0");
-  return out;
-}
 
-
-type AliasScanEntry = { code: string; spaced: string; compact: string; len: number };
-type AliasMaps = { exact: Map<string, string>; compact: Map<string, string>; scan: AliasScanEntry[] };
-type RuntimeRatesCache = { stored: Stored; alias: AliasMaps; loadedAtMs: number };
+type AliasIndexCache = { exact: Map<string, string>; compact: Map<string, string>; scan: string[] };
+type RuntimeRatesCache = { stored: Stored; alias: AliasIndexCache; loadedAtMs: number };
 
 let RUNTIME_RATES_CACHE: RuntimeRatesCache | null = null;
 
@@ -281,43 +271,47 @@ function normalizeAlias(raw: string) {
   return { spaced, compact };
 }
 
-function buildAliasMaps(stored: Stored): AliasMaps {
+function buildAliasIndexCache(stored: Stored): AliasIndexCache {
   const exact = new Map<string, string>();
   const compact = new Map<string, string>();
-  const scan: AliasScanEntry[] = [];
+  const scan: string[] = [];
   const seen = new Set<string>();
 
   const add = (raw: string, code: string) => {
     const n = normalizeAlias(raw);
     if (!n) return;
-
     if (!exact.has(n.spaced)) exact.set(n.spaced, code);
     if (n.compact && n.compact.length >= 2 && !compact.has(n.compact)) compact.set(n.compact, code);
 
-    const key = `${code}|${n.spaced}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      scan.push({ code, spaced: n.spaced, compact: n.compact, len: Math.max(n.spaced.length, n.compact.length) });
+    if (!seen.has(n.spaced)) {
+      seen.add(n.spaced);
+      scan.push(n.spaced);
     }
   };
 
-  for (const code in stored.rates) {
-    const r = stored.rates[code];
-    if (!r) continue;
-
-    // Always allow matching by the code itself (usd, btc, ...).
-    add(code, code);
-
-    if (r.fa) add(r.fa, code);
-    if (r.title) add(r.title, code);
-
-    const extra = (r as unknown as { aliases?: unknown }).aliases;
-    if (Array.isArray(extra)) {
-      for (const x of extra) if (typeof x === "string" && x.trim()) add(x, code);
+  const idx = stored.aliasIndex || {};
+  // Prefer precomputed aliasIndex from JSON
+  if (Object.keys(idx).length) {
+    // aliasIndex is expected to be pre-normalized, but we still run normalizeAlias for safety.
+    for (const [k, code] of Object.entries(idx)) {
+      if (typeof k === "string" && typeof code === "string" && stored.rates[code]) add(k, code);
+    }
+  } else {
+    // Backward compatibility: build a minimal alias index from rates (one-time per load).
+    for (const code in stored.rates) {
+      const r = stored.rates[code];
+      add(code, code);
+      add(r.fa || "", code);
+      add(r.title || "", code);
+      if (Array.isArray(r.aliases)) for (const a of r.aliases) add(a, code);
     }
   }
 
-  scan.sort((a, b) => b.len - a.len);
+  // Always allow matching by the code itself (usd, btc, ...), even if missing in aliasIndex.
+ (usd, btc, ...), even if missing in aliasIndex.
+  for (const code in stored.rates) add(code, code);
+
+  scan.sort((a, b) => b.length - a.length);
   return { exact, compact, scan };
 }
 // -----------------------------
@@ -434,18 +428,17 @@ type FetchRawResult =
   | { kind: "not_modified" }
   | { kind: "ok"; rawText: string; etag?: string | null };
 
-async function fetchPricesRaw(env: Env): Promise<FetchRawResult> {
+async function fetchPricesRaw(): Promise<string> {
   const headers: Record<string, string> = { "User-Agent": "Mozilla/5.0" };
-  const etag = await env.BOT_KV.get(KEY_ETAG);
-  if (etag) headers["If-None-Match"] = etag;
 
-  const res = await fetch(PRICES_JSON_URL, { headers });
-  if (res.status === 304) return { kind: "not_modified" };
+  const res = await fetch(PRICES_JSON_URL, {
+    headers,
+    // enable Cloudflare fetch caching as an extra layer
+    cf: { cacheEverything: true, cacheTtl: 1800 },
+  } as RequestInit & { cf?: unknown });
+
   if (!res.ok) throw new Error(`Failed to fetch rates_v2_latest: HTTP ${res.status}`);
-
-  const rawText = await res.text();
-  const newEtag = res.headers.get("etag");
-  return { kind: "ok", rawText, etag: newEtag };
+  return await res.text();
 }
 
 function validateStored(stored: Stored): string | null {
@@ -453,23 +446,24 @@ function validateStored(stored: Stored): string | null {
   if (!Number.isFinite(stored.fetchedAtMs) || stored.fetchedAtMs <= 0) return "invalid fetchedAtMs";
   if (!stored.rates || typeof stored.rates !== "object") return "invalid rates";
   const keys = Object.keys(stored.rates);
-  if (keys.length < 50) return "rates too small";
-  for (const k of keys) {
-    const r = stored.rates[k];
-    if (!r) return `missing rate ${k}`;
-    if (!Number.isFinite(r.price)) return `invalid price for ${k}`;
-    if (!Number.isFinite(r.unit) || r.unit < 1) return `invalid unit for ${k}`;
-    if (r.kind !== "currency" && r.kind !== "gold" && r.kind !== "crypto") return `invalid kind for ${k}`;
-    if (typeof r.title !== "string") return `invalid title for ${k}`;
-    if (typeof r.fa !== "string") return `invalid fa for ${k}`;
-    if (typeof r.emoji !== "string") return `invalid emoji for ${k}`;
-  }
+  if (keys.length < 10) return "rates too small";
+
+  if (!stored.lists || typeof stored.lists !== "object") return "missing lists";
+  if (!Array.isArray(stored.lists.fiat) || !Array.isArray(stored.lists.crypto)) return "invalid lists";
+  if (stored.lists.fiat.length === 0) return "lists.fiat empty";
+  if (stored.lists.crypto.length === 0) return "lists.crypto empty";
+
+  // quick integrity checks (best-effort)
+  for (const c of stored.lists.fiat) if (typeof c !== "string" || !stored.rates[c]) return "lists.fiat contains unknown code";
+  for (const c of stored.lists.crypto) if (typeof c !== "string" || !stored.rates[c]) return "lists.crypto contains unknown code";
+
+  // aliasIndex is optional for backward compatibility; Worker will build a fallback if missing.
+  if (!stored.aliasIndex || typeof stored.aliasIndex !== "object") stored.aliasIndex = {};
+
   return null;
 }
 
-async function buildStoredFromRaw(rawText: string): Promise<{ stored: Stored; rawHash: string }> {
-  const rawHash = await sha256Hex(rawText);
-
+function buildStoredFromRaw(rawText: string): Stored {
   const parsed = JSON.parse(rawText) as unknown;
 
   const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -487,6 +481,24 @@ async function buildStoredFromRaw(rawText: string): Promise<{ stored: Stored; ra
 
   const source = typeof p.source === "string" && p.source ? (p.source as string) : PRICES_JSON_URL;
   const timestamp = typeof p.timestamp === "string" ? (p.timestamp as string) : undefined;
+
+  const aliasIndexIn = isRecord(p.aliasIndex) ? (p.aliasIndex as Record<string, unknown>) : null;
+  const listsIn = isRecord(p.lists) ? (p.lists as Record<string, unknown>) : null;
+
+  const aliasIndex: Record<string, string> = {};
+  if (aliasIndexIn) {
+    for (const [k, v] of Object.entries(aliasIndexIn)) {
+      if (typeof k === "string" && typeof v === "string") aliasIndex[k] = v;
+    }
+  }
+
+  const lists: { fiat: string[]; crypto: string[] } = { fiat: [], crypto: [] };
+  if (listsIn) {
+    const fiat = (listsIn.fiat as unknown);
+    const crypto = (listsIn.crypto as unknown);
+    if (Array.isArray(fiat)) lists.fiat = fiat.filter((x) => typeof x === "string") as string[];
+    if (Array.isArray(crypto)) lists.crypto = crypto.filter((x) => typeof x === "string") as string[];
+  }
 
   const rates: Record<string, Rate> = {};
 
@@ -512,7 +524,7 @@ async function buildStoredFromRaw(rawText: string): Promise<{ stored: Stored; ra
     const emoji = emojiRaw || meta?.emoji || "";
     const title = titleRaw || fa;
 
-    const rate: Rate = { price: priceNum, unit, kind, title, fa, emoji };
+    const rate: Rate = { kind: kind as Rate["kind"], price: priceNum, unit, fa, title, emoji };
 
     const usdPrice = parseNumberLoose(r0.usdPrice);
     if (usdPrice != null) rate.usdPrice = usdPrice;
@@ -532,80 +544,55 @@ async function buildStoredFromRaw(rawText: string): Promise<{ stored: Stored; ra
     rates[code] = rate;
   }
 
-  const stored: Stored = { fetchedAtMs, source, rates };
+  // If lists were not provided (or incomplete), compute them from rates (backward compatible).
+  if (!lists.fiat.length || !lists.crypto.length) {
+    const fallback = computeDefaultListsFromRates(rates);
+    if (!lists.fiat.length) lists.fiat = fallback.fiat;
+    if (!lists.crypto.length) lists.crypto = fallback.crypto;
+  }
+
+  const stored: Stored = { fetchedAtMs, source, rates, aliasIndex, lists };
   if (timestamp) stored.timestamp = timestamp;
 
-  return { stored, rawHash };
+  return stored;
 }
 
 
-async function refreshRates(env: Env) {
-  const now = Date.now();
 
-  // Read previous payload for status/debug only (do not fail refresh if it's missing/corrupt).
-  let prevTxt: string | null = null;
-  let prevCount = 0;
-  try {
-    prevTxt = await env.BOT_KV.get(KEY_RATES, "text");
-    if (prevTxt) {
-      const prev = JSON.parse(prevTxt) as Stored;
-      prevCount = Object.keys(prev.rates || {}).length;
-    }
-  } catch {
-    prevTxt = null;
-    prevCount = 0;
-  }
+async function refreshRates(
+  ctx?: ExecutionContext
+): Promise<{ ok: true; changed: boolean; count: number; fetchedAtMs: number } | { ok: false; error: string }> {
+  const prevFetchedAtMs = RUNTIME_RATES_CACHE?.stored?.fetchedAtMs ?? 0;
 
   try {
-    const fetched = await fetchPricesRaw(env);
-
-    if (fetched.kind === "not_modified") {
-      await env.BOT_KV
-        .put(KEY_REFRESH_STATUS, JSON.stringify({ ok: true, changed: false, at: now, note: "not_modified", count: prevCount }), {
-          expirationTtl: 24 * 3600,
-        })
-        .catch(() => {});
-      return { ok: true, changed: false, count: prevCount };
-    }
-
-    const { stored, rawHash } = await buildStoredFromRaw(fetched.rawText);
+    const rawText = await fetchPricesRaw();
+    const stored = buildStoredFromRaw(rawText);
 
     const validationError = validateStored(stored);
     if (validationError) throw new Error(`validation_failed:${validationError}`);
 
-    const prevHash = await env.BOT_KV.get(KEY_HASH);
-    const changed = prevHash !== rawHash;
+    // Update caches.default for all subsequent requests (per PoP).
+    const cacheRes = new Response(rawText, {
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": `public, max-age=${PRICES_CACHE_TTL_SECONDS}`,
+      },
+    });
+    // Best-effort; if it fails we still keep in-memory cache.
+    await caches.default.put(PRICES_CACHE_KEY, cacheRes.clone()).catch(() => {});
 
-    if (changed || !prevTxt) {
-      const serialized = JSON.stringify(stored);
-      await env.BOT_KV.put(KEY_RATES, serialized);
-      await env.BOT_KV.put(KEY_HASH, rawHash);
-      if (fetched.etag) await env.BOT_KV.put(KEY_ETAG, fetched.etag);
+    // Update in-isolate cache immediately.
+    RUNTIME_RATES_CACHE = { stored, alias: buildAliasIndexCache(stored), loadedAtMs: Date.now() };
 
-      // update in-isolate cache immediately
-      RUNTIME_RATES_CACHE = { stored, alias: buildAliasMaps(stored), loadedAtMs: Date.now() };
-    } else {
-      // Upstream unchanged, but keep ETag fresh if present
-      if (fetched.etag) await env.BOT_KV.put(KEY_ETAG, fetched.etag);
-    }
-
+    const changed = stored.fetchedAtMs !== prevFetchedAtMs;
     const count = Object.keys(stored.rates).length;
-    await env.BOT_KV
-      .put(KEY_REFRESH_STATUS, JSON.stringify({ ok: true, changed, at: now, count, fetchedAtMs: stored.fetchedAtMs }), {
-        expirationTtl: 24 * 3600,
-      })
-      .catch(() => {});
-    return { ok: true, changed, count };
-  } catch (e: unknown) {
+
+    return { ok: true, changed, count, fetchedAtMs: stored.fetchedAtMs };
+  } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-
-    await env.BOT_KV
-      .put(KEY_REFRESH_STATUS, JSON.stringify({ ok: false, changed: false, at: now, error: msg, count: prevCount }), {
-        expirationTtl: 24 * 3600,
-      })
-      .catch(() => {});
-
-    throw e;
+    // keep last good cache if refresh fails
+    ctx?.waitUntil?.(Promise.resolve());
+    return { ok: false, error: msg };
   }
 }
 
@@ -613,33 +600,41 @@ async function refreshRates(env: Env) {
 async function getStoredOrRefresh(env: Env, ctx: ExecutionContext): Promise<Stored> {
   const now = Date.now();
 
-  // In-isolate memory cache: drastically reduces KV reads + JSON.parse in hot path.
+  // In-isolate memory cache: reduces JSON.parse and cache reads.
   const cached = RUNTIME_RATES_CACHE;
   if (cached && now - cached.loadedAtMs <= RATES_CACHE_TTL_MS) {
-    if (now - cached.stored.fetchedAtMs > STALE_REFRESH_MS) ctx.waitUntil(refreshRates(env).catch(() => {}));
+    if (now - cached.stored.fetchedAtMs > STALE_REFRESH_MS) ctx.waitUntil(refreshRates(ctx).catch(() => {}));
     return cached.stored;
   }
 
-  const txt = await env.BOT_KV.get(KEY_RATES, "text");
-  if (txt) {
-    const stored = JSON.parse(txt) as Stored;
-    if (now - stored.fetchedAtMs > STALE_REFRESH_MS) ctx.waitUntil(refreshRates(env).catch(() => {}));
-    RUNTIME_RATES_CACHE = { stored, alias: buildAliasMaps(stored), loadedAtMs: now };
-    return stored;
+  // caches.default (per PoP)
+  const hit = await caches.default.match(PRICES_CACHE_KEY);
+  if (hit) {
+    const rawText = await hit.text();
+    const stored = buildStoredFromRaw(rawText);
+    const validationError = validateStored(stored);
+    if (!validationError) {
+      if (now - stored.fetchedAtMs > STALE_REFRESH_MS) ctx.waitUntil(refreshRates(ctx).catch(() => {}));
+      RUNTIME_RATES_CACHE = { stored, alias: buildAliasIndexCache(stored), loadedAtMs: now };
+      return stored;
+    }
   }
 
-  // Cold start / empty KV: refresh once, then read.
-  await refreshRates(env);
-  const txt2 = await env.BOT_KV.get(KEY_RATES, "text");
-  if (!txt2) throw new Error("no data");
-  const stored2 = JSON.parse(txt2) as Stored;
-  RUNTIME_RATES_CACHE = { stored: stored2, alias: buildAliasMaps(stored2), loadedAtMs: now };
-  return stored2;
+  // Cold start: fetch + populate cache
+  const res = await refreshRates(ctx);
+  if (res.ok) {
+    const c = RUNTIME_RATES_CACHE;
+    if (c) return c.stored;
+  }
+
+  // Last resort: try direct fetch without caching
+  const rawText = await fetchPricesRaw();
+  const stored = buildStoredFromRaw(rawText);
+  RUNTIME_RATES_CACHE = { stored, alias: buildAliasIndexCache(stored), loadedAtMs: now };
+  return stored;
 }
 
-// -----------------------------
-// Natural language parsing for conversion queries
-// -----------------------------
+
 
 function parsePersianNumber(tokens: string[]): number | null {
   const ones: Record<string, number> = {
@@ -776,11 +771,11 @@ function hasBounded(haystack: string, needle: string) {
   return re.test(haystack);
 }
 
-function findCode(textNorm: string, rates: Record<string, Rate>, alias?: AliasMaps) {
+function findCode(textNorm: string, rates: Record<string, Rate>, alias?: AliasIndexCache) {
   const cleaned = stripPunct(textNorm).replace(/\s+/g, " ").trim();
   const compact = cleaned.replace(/\s+/g, "");
 
-  // 1) exact/compact full-string matches
+  // 1) exact/compact full-string matches (fast path)
   if (alias) {
     const direct = alias.exact.get(cleaned) ?? alias.compact.get(compact);
     if (direct && rates[direct]) return direct;
@@ -788,9 +783,12 @@ function findCode(textNorm: string, rates: Record<string, Rate>, alias?: AliasMa
 
   // 2) bounded scan inside the sentence (works for inputs like "100 دلار")
   if (alias) {
-    for (const a of alias.scan) {
-      if (a.spaced && hasBounded(cleaned, a.spaced)) return a.code;
-      if (a.compact && hasBounded(compact, a.compact)) return a.code;
+    for (const needle of alias.scan) {
+      if (needle.length < 2) continue;
+      if (hasBounded(cleaned, needle)) {
+        const code = alias.exact.get(needle);
+        if (code && rates[code]) return code;
+      }
     }
   }
 
@@ -799,12 +797,6 @@ function findCode(textNorm: string, rates: Record<string, Rate>, alias?: AliasMa
   if (m) {
     const candidate = m[1].toLowerCase();
     if (rates[candidate]) return candidate;
-  }
-
-  // 4) fallback: compare against rate titles (no aliases)
-  for (const key in rates) {
-    const t = rates[key]?.title ? stripPunct(norm(rates[key].title)).replace(/\s+/g, "") : "";
-    if (compact === key || (t && compact === t)) return key;
   }
 
   return null;
@@ -847,7 +839,7 @@ function pruneParseCache(now: number) {
   }
 }
 
-function getParsedIntent(userId: number, textNorm: string, rates: Record<string, Rate>, alias?: AliasMaps) {
+function getParsedIntent(userId: number, textNorm: string, rates: Record<string, Rate>, alias?: AliasIndexCache) {
   const now = Date.now();
   pruneParseCache(now);
   const cacheKey = `${userId}:${textNorm}`;
@@ -963,60 +955,48 @@ function chunkText(s: string, maxLen = 3500) {
 
 function buildAll(stored: Stored) {
   const rates = stored.rates;
-  const codes = Object.keys(rates);
 
   const goldItems: string[] = [];
   const currencyItems: string[] = [];
   const cryptoItems: string[] = [];
 
-  const priority = ["usd", "eur", "aed", "try", "afn", "iqd", "gbp"];
-  const cryptoPriority = ["btc", "eth", "ton", "usdt", "trx", "not", "doge", "sol"];
+  const usd = rates["usd"];
+  const usdPer1 = usd ? usd.price / (usd.unit || 1) : null;
 
-  codes.sort((a, b) => {
-    const rA = rates[a];
-    const rB = rates[b];
-    if (rA.kind !== rB.kind) return 0;
-    if (rA.kind === "currency") {
-      const idxA = priority.indexOf(a);
-      const idxB = priority.indexOf(b);
-      if (idxA !== -1 && idxB !== -1) return idxA - idxB;
-      if (idxA !== -1) return -1;
-      if (idxB !== -1) return 1;
-    }
-    if (rA.kind === "crypto") {
-      const idxA = cryptoPriority.indexOf(a);
-      const idxB = cryptoPriority.indexOf(b);
-      if (idxA !== -1 && idxB !== -1) return idxA - idxB;
-      if (idxA !== -1) return -1;
-      if (idxB !== -1) return 1;
-    }
-    return a.localeCompare(b);
-  });
-
-  for (const c of codes) {
+  // Fiat (gold + currency) in precomputed order
+  for (const c of stored.lists.fiat || []) {
     const r = rates[c];
+    if (!r || r.kind === "crypto") continue;
+
     const showUnit = r.kind === "currency" && (r.unit || 1) > 1;
     const baseAmount = showUnit ? (r.unit || 1) : 1;
     const baseToman = showUnit ? Math.round(r.price) : Math.round(r.price / (r.unit || 1));
     const priceStr = formatToman(baseToman);
 
-    if (r.kind === "crypto") {
-      const usdP = r.usdPrice != null ? formatUSD(r.usdPrice) : "?";
-      const changePart =
-        typeof r.change24h === "number" ? ` | ${r.change24h >= 0 ? "🟢" : "🔴"} ${Math.abs(r.change24h).toFixed(1)}%` : "";
-      const line = `💎 <b>${r.fa}</b> (${c.toUpperCase()})\n└ ${priceStr} ت | ${usdP}$${changePart}`;
-      cryptoItems.push(line);
-    } else {
-      const meta = META[c] ?? { emoji: "💱", fa: r.title || c.toUpperCase() };
-      const usd = stored.rates["usd"];
-      const usdPer1 = usd ? usd.price / (usd.unit || 1) : null;
-      const usdEq = usdPer1 && c !== "usd" && r.kind === "currency" ? baseToman / usdPer1 : null;
-      const unitPrefix = showUnit ? `${baseAmount} ` : "";
-      const usdPart = usdEq != null ? ` (≈ $${formatUSD(usdEq)})` : "";
-      const line = `${meta.emoji} <b>${unitPrefix}${meta.fa}:</b> \u200E<code>${priceStr}</code> تومان${usdPart}`;
-      if (r.kind === "gold" || c.includes("coin") || c.includes("gold")) goldItems.push(line);
-      else currencyItems.push(line);
-    }
+    const meta = META[c] ?? { emoji: "💱", fa: r.title || c.toUpperCase() };
+    const usdEq = usdPer1 && c !== "usd" && r.kind === "currency" ? baseToman / usdPer1 : null;
+    const unitPrefix = showUnit ? `${baseAmount} ` : "";
+    const usdPart = usdEq != null ? ` (≈ $${formatUSD(usdEq)})` : "";
+    const line = `${meta.emoji} <b>${unitPrefix}${meta.fa}:</b> \u200E<code>${priceStr}</code> تومان${usdPart}`;
+
+    if (r.kind === "gold" || c.includes("coin") || c.includes("gold")) goldItems.push(line);
+    else currencyItems.push(line);
+  }
+
+  // Crypto in precomputed order
+  for (const c of stored.lists.crypto || []) {
+    const r = rates[c];
+    if (!r || r.kind !== "crypto") continue;
+
+    const per1 = Math.round(r.price / (r.unit || 1));
+    const priceStr = formatToman(per1);
+    const meta = CRYPTO_META[c] ?? { emoji: r.emoji || "💎", fa: r.fa || r.title || c.toUpperCase() };
+
+    const usdP = r.usdPrice != null ? formatUSD(r.usdPrice) : "?";
+    const changePart =
+      typeof r.change24h === "number" ? ` | ${r.change24h >= 0 ? "🟢" : "🔴"} ${Math.abs(r.change24h).toFixed(1)}%` : "";
+    const line = `💎 <b>${meta.fa}</b> (${c.toUpperCase()})\n└ ${priceStr} ت | ${usdP}$${changePart}`;
+    cryptoItems.push(line);
   }
 
   const lines: string[] = [];
@@ -1048,6 +1028,7 @@ function buildAll(stored: Stored) {
   return lines.join("\n");
 }
 
+
 const PRICE_PAGE_SIZE = 8;
 
 type PriceCategory = "fiat" | "crypto";
@@ -1078,25 +1059,13 @@ function shortColText(s: string, max = 18) {
 
 function buildPriceItems(stored: Stored, category: PriceCategory): PriceListItem[] {
   const rates = stored.rates;
-  const codes = Object.keys(rates);
+  const codes = stored.lists?.[category] ?? [];
 
-  const priority = ["usd", "eur", "aed", "try", "afn", "iqd", "gbp"];
-  const cryptoPriority = ["btc", "eth", "ton", "usdt", "trx", "not", "doge", "sol"];
-
+  const items: PriceListItem[] = [];
   if (category === "crypto") {
-    const cryptoCodes = codes.filter((c) => rates[c]?.kind === "crypto");
-    cryptoCodes.sort((a, b) => {
-      const idxA = cryptoPriority.indexOf(a);
-      const idxB = cryptoPriority.indexOf(b);
-      if (idxA !== -1 && idxB !== -1) return idxA - idxB;
-      if (idxA !== -1) return -1;
-      if (idxB !== -1) return 1;
-      return a.localeCompare(b);
-    });
-
-    const items: PriceListItem[] = [];
-    for (const c of cryptoCodes) {
+    for (const c of codes) {
       const r = rates[c];
+      if (!r || r.kind !== "crypto") continue;
       const per1 = Math.round(r.price / (r.unit || 1));
       const toman = formatToman(per1);
       const meta = CRYPTO_META[c] ?? { emoji: r.emoji || "💎", fa: r.fa || r.title || c.toUpperCase() };
@@ -1111,31 +1080,9 @@ function buildPriceItems(stored: Stored, category: PriceCategory): PriceListItem
     return items;
   }
 
-  const goldCodes: string[] = [];
-  const currencyCodes: string[] = [];
-
   for (const c of codes) {
     const r = rates[c];
     if (!r || r.kind === "crypto") continue;
-    if (r.kind === "gold" || c.includes("coin") || c.includes("gold")) goldCodes.push(c);
-    else currencyCodes.push(c);
-  }
-
-  goldCodes.sort((a, b) => a.localeCompare(b));
-  currencyCodes.sort((a, b) => {
-    const idxA = priority.indexOf(a);
-    const idxB = priority.indexOf(b);
-    if (idxA !== -1 && idxB !== -1) return idxA - idxB;
-    if (idxA !== -1) return -1;
-    if (idxB !== -1) return 1;
-    return a.localeCompare(b);
-  });
-
-  const merged = [...goldCodes, ...currencyCodes];
-
-  const items: PriceListItem[] = [];
-  for (const c of merged) {
-    const r = rates[c];
     const showUnit = r.kind === "currency" && (r.unit || 1) > 1;
     const baseAmount = showUnit ? (r.unit || 1) : 1;
     const baseToman = showUnit ? Math.round(r.price) : Math.round(r.price / (r.unit || 1));
@@ -1376,8 +1323,8 @@ async function safeJson<T>(req: Request): Promise<T | null> {
 // -----------------------------
 
 export default {
-  async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext) {
-    await refreshRates(env).catch(() => {});
+  async scheduled(_event: ScheduledEvent, _env: Env, ctx: ExecutionContext) {
+    await refreshRates(ctx).catch(() => {});
   },
 
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -1388,7 +1335,7 @@ export default {
       const key = url.searchParams.get("key") || "";
       if (!env.ADMIN_KEY || key !== env.ADMIN_KEY) return new Response("Unauthorized", { status: 401 });
       try {
-        const r = await refreshRates(env);
+        const r = await refreshRates(ctx);
         return new Response(JSON.stringify(r), { headers: { "content-type": "application/json" } });
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -1520,7 +1467,7 @@ export default {
           .filter(Boolean);
         const key = parts[1] || "";
         if (!env.ADMIN_KEY || key !== env.ADMIN_KEY) return;
-        const r = await refreshRates(env);
+        const r = await refreshRates(ctx);
         await tgSend(env, chatId, r.ok ? "✅ بروزرسانی شد" : "⛔️ خطا", replyTo);
         return;
       }
@@ -1550,3 +1497,35 @@ export default {
     return new Response("ok");
   },
 };
+
+function computeDefaultListsFromRates(rates: Record<string, Rate>): { fiat: string[]; crypto: string[] } {
+  const cryptoCodes: string[] = [];
+  const goldCodes: string[] = [];
+  const currencyCodes: string[] = [];
+
+  for (const c in rates) {
+    const r = rates[c];
+    if (r.kind === "crypto") cryptoCodes.push(c);
+    else if (r.kind === "gold" || c.includes("coin") || c.includes("gold")) goldCodes.push(c);
+    else currencyCodes.push(c);
+  }
+
+  const currencyPriority = new Set(PRIORITY);
+  const cryptoPriority = new Set(CRYPTO_PRIORITY);
+
+  goldCodes.sort((a, b) => a.localeCompare(b));
+  currencyCodes.sort((a, b) => {
+    const ap = currencyPriority.has(a) ? PRIORITY.indexOf(a) : 999;
+    const bp = currencyPriority.has(b) ? PRIORITY.indexOf(b) : 999;
+    return ap === bp ? a.localeCompare(b) : ap - bp;
+  });
+  cryptoCodes.sort((a, b) => {
+    const ap = cryptoPriority.has(a) ? CRYPTO_PRIORITY.indexOf(a) : 999;
+    const bp = cryptoPriority.has(b) ? CRYPTO_PRIORITY.indexOf(b) : 999;
+    return ap === bp ? a.localeCompare(b) : ap - bp;
+  });
+
+  return { fiat: [...goldCodes, ...currencyCodes], crypto: cryptoCodes };
+}
+
+
