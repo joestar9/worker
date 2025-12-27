@@ -17,7 +17,6 @@ export interface Env {
 const BOT_USERNAME = "worker093578bot";
 const PRICES_JSON_URL = "https://raw.githubusercontent.com/joestar9/price-scraper/main/rates_v2_latest";
 
-
 const TG_JSON_HEADERS = { "content-type": "application/json" } as const;
 const TG_PARSE_MODE = "HTML" as const;
 
@@ -48,13 +47,10 @@ const KEY_RATES = "rates:v2:latest";
 const KEY_HASH = "rates:v2:hash";
 
 const KEY_ETAG = "rates:v2:etag";
-const KEY_BACKUP = "rates:v2:backup";
 const KEY_REFRESH_STATUS = "rates:v2:refresh_status";
-const KEY_REFRESH_LOCK = "rates:v2:refresh_lock";
 
 const RATES_CACHE_TTL_MS = 60_000; // memory cache per isolate
 const STALE_REFRESH_MS = 35 * 60_000;
-const REFRESH_LOCK_TTL_SEC = 90;
 
 // Parsing caches
 const PARSE_TTL_MS = 15_000;
@@ -267,151 +263,63 @@ async function sha256Hex(s: string) {
 }
 
 
-type AliasMaps = { exact: Map<string, string>; compact: Map<string, string> };
+type AliasScanEntry = { code: string; spaced: string; compact: string; len: number };
+type AliasMaps = { exact: Map<string, string>; compact: Map<string, string>; scan: AliasScanEntry[] };
 type RuntimeRatesCache = { stored: Stored; alias: AliasMaps; loadedAtMs: number };
 
 let RUNTIME_RATES_CACHE: RuntimeRatesCache | null = null;
 
-const GENERIC_ALIAS = new Set([
-  "طلا",
-  "سکه",
-  "ارز",
-  "قیمت",
-  "crypto",
-  "کریپتو",
-  "coin",
-  "gold",
-]);
+// Prevent obviously-generic aliases from matching everything.
+// (Keep this list tiny; you can still add real aliases like "طلا" or "سکه" in your JSON if you want.)
+const GENERIC_ALIAS = new Set(["قیمت", "price"]);
 
-function addAlias(maps: AliasMaps, raw: string, code: string) {
+function normalizeAlias(raw: string) {
   const spaced = stripPunct(norm(String(raw))).replace(/\s+/g, " ").trim();
-  if (!spaced || spaced.length < 2) return;
-
-  // prevent overly-generic matches from data-driven aliases
-  if (GENERIC_ALIAS.has(spaced)) return;
-
-  if (!maps.exact.has(spaced)) maps.exact.set(spaced, code);
-
+  if (!spaced || spaced.length < 2) return null;
+  if (GENERIC_ALIAS.has(spaced)) return null;
   const compact = spaced.replace(/\s+/g, "");
-  if (compact && compact.length >= 2 && !maps.compact.has(compact)) maps.compact.set(compact, code);
+  return { spaced, compact };
 }
 
 function buildAliasMaps(stored: Stored): AliasMaps {
-  const maps: AliasMaps = { exact: new Map(), compact: new Map() };
+  const exact = new Map<string, string>();
+  const compact = new Map<string, string>();
+  const scan: AliasScanEntry[] = [];
+  const seen = new Set<string>();
 
-  // Keep the legacy aliases first (behavior compatibility).
-  for (const a of ALIASES) {
-    for (const k of a.keys) {
-      const spaced = stripPunct(norm(String(k))).replace(/\s+/g, " ").trim();
-      if (!spaced) continue;
-      if (!maps.exact.has(spaced)) maps.exact.set(spaced, a.code);
-      const compact = spaced.replace(/\s+/g, "");
-      if (compact && !maps.compact.has(compact)) maps.compact.set(compact, a.code);
+  const add = (raw: string, code: string) => {
+    const n = normalizeAlias(raw);
+    if (!n) return;
+
+    if (!exact.has(n.spaced)) exact.set(n.spaced, code);
+    if (n.compact && n.compact.length >= 2 && !compact.has(n.compact)) compact.set(n.compact, code);
+
+    const key = `${code}|${n.spaced}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      scan.push({ code, spaced: n.spaced, compact: n.compact, len: Math.max(n.spaced.length, n.compact.length) });
     }
-  }
+  };
 
-  // Data-driven aliases from the stored rates payload (backward compatible if absent).
   for (const code in stored.rates) {
     const r = stored.rates[code];
     if (!r) continue;
 
     // Always allow matching by the code itself (usd, btc, ...).
-    addAlias(maps, code, code);
+    add(code, code);
 
-    if (r.fa) addAlias(maps, r.fa, code);
-    if (r.title) addAlias(maps, r.title, code);
+    if (r.fa) add(r.fa, code);
+    if (r.title) add(r.title, code);
 
     const extra = (r as unknown as { aliases?: unknown }).aliases;
     if (Array.isArray(extra)) {
-      for (const x of extra) {
-        if (typeof x === "string" && x.trim()) addAlias(maps, x, code);
-      }
+      for (const x of extra) if (typeof x === "string" && x.trim()) add(x, code);
     }
   }
 
-  return maps;
+  scan.sort((a, b) => b.len - a.len);
+  return { exact, compact, scan };
 }
-
-
-// Aliases used for currency detection in free text.
-const ALIASES: Array<{ keys: string[]; code: string }> = [
-  { keys: ["دلار", "دلارامریکا", "دلارآمریکا", "دلار امریکا", "usd", "us dollar", "dollar"], code: "usd" },
-  { keys: ["یورو", "eur", "euro"], code: "eur" },
-  { keys: ["پوند", "پوندانگلیس", "پوند انگلیس", "gbp", "britishpound"], code: "gbp" },
-  { keys: ["فرانک", "فرانکسوئیس", "فرانک سوئیس", "chf", "swissfranc"], code: "chf" },
-  { keys: ["دلارکانادا", "دلار کانادا", "دلارکانادایی", "دلار کانادایی", "دلارکاندا", "دلار کاندا", "cad", "canadiandollar", "canada", "کاندایی"], code: "cad" },
-  { keys: ["دلاراسترالیا", "دلار استرالیا", "استرالیا", "aud", "australiandollar"], code: "aud" },
-  { keys: ["درهم", "درهمامارات", "درهم امارات", "امارات", "aed", "uaedirham"], code: "aed" },
-  { keys: ["لیر", "لیرترکیه", "لیر ترکیه", "ترکیه", "try", "turkishlira"], code: "try" },
-  { keys: ["ین", "ینژاپن", "ین ژاپن", "ژاپن", "jpy", "japaneseyen"], code: "jpy" },
-  { keys: ["یوان", "یوانچین", "یوان چین", "چین", "cny", "chineseyuan"], code: "cny" },
-  { keys: ["ریال عربستان", "ریالعربستان", "ریاض", "عربستان", "sar", "ksa", "saudiriyal"], code: "sar" },
-  { keys: ["افغانی", "افغان", "afn", "afghanafghani"], code: "afn" },
-  { keys: ["ریال عمان", "عمان", "omr", "omanirial"], code: "omr" },
-  { keys: ["ریال قطر", "قطر", "qar", "qataririyal"], code: "qar" },
-  { keys: ["دینارکویت", "دینار کویت", "کویت", "kwd", "kuwaitidinar"], code: "kwd" },
-  { keys: ["دیناربحرین", "دینار بحرین", "بحرین", "bhd", "bahrainidinar"], code: "bhd" },
-  { keys: ["دینارعراق", "دینار عراق", "عراق", "عراقی", "iqd", "iraqidinar", "دینارعراقی", "دینار عراقی", "iraq"], code: "iqd" },
-  { keys: ["کرونسوئد", "کرون سوئد", "سوئد", "sek", "swedishkrona"], code: "sek" },
-  { keys: ["کروننروژ", "کرون نروژ", "نروژ", "nok", "norwegiankrone"], code: "nok" },
-  { keys: ["کرون دانمارک", "دانمارک", "dkk", "danishkrone"], code: "dkk" },
-  { keys: ["روبل", "روبل روسیه", "روسیه", "rub", "russianruble"], code: "rub" },
-  { keys: ["بات", "بات تایلند", "تایلند", "thb", "thaibaht"], code: "thb" },
-  { keys: ["دلار سنگاپور", "سنگاپور", "sgd", "singaporedollar"], code: "sgd" },
-  { keys: ["دلار هنگ کنگ", "هنگکنگ", "hkd", "hongkongdollar"], code: "hkd" },
-  { keys: ["منات", "منات آذربایجان", "آذربایجان", "azn", "azerbaijanimanat"], code: "azn" },
-  { keys: ["درام", "درام ارمنستان", "ارمنستان", "amd", "armeniandram"], code: "amd" },
-  { keys: ["رینگیت", "مالزی", "myr", "ringgit"], code: "myr" },
-  { keys: ["روپیه هند", "هند", "inr", "indianrupee"], code: "inr" },
-
-  { keys: ["طلا", "gold", "گرم طلا", "گرمطلای18", "طلای18", "طلای ۱۸", "ذهب"], code: "gold_gram_18k" },
-  { keys: ["مثقال", "مثقالطلا", "mithqal"], code: "gold_mithqal" },
-  { keys: ["اونس", "انس", "اونس طلا", "goldounce", "ounce"], code: "gold_ounce" },
-  { keys: ["سکه", "سکه امامی", "امامی", "coin_emami"], code: "coin_emami" },
-  { keys: ["بهار آزادی", "coin_azadi"], code: "coin_azadi" },
-  { keys: ["نیم سکه", "coin_half_azadi"], code: "coin_half_azadi" },
-  { keys: ["ربع سکه", "coin_quarter_azadi"], code: "coin_quarter_azadi" },
-  { keys: ["گرمی", "سکه گرمی", "coin_gerami"], code: "coin_gerami" },
-
-  { keys: ["بیت", "بیتکوین", "بیت کوین", "btc", "bitcoin"], code: "btc" },
-  { keys: ["اتریوم", "eth", "ethereum"], code: "eth" },
-  { keys: ["تتر", "usdt", "tether", "tetherusdt"], code: "usdt" },
-  { keys: ["بی ان بی", "bnb", "binance"], code: "bnb" },
-  { keys: ["ریپل", "xrp"], code: "xrp" },
-  { keys: ["یو اس دی سی", "usdc"], code: "usdc" },
-  { keys: ["سولانا", "sol", "solana"], code: "sol" },
-  { keys: ["ترون", "trx", "tron"], code: "trx" },
-  { keys: ["دوج", "دوج کوین", "doge", "dogecoin"], code: "doge" },
-  { keys: ["شیبا", "shib", "shiba"], code: "shib" },
-  { keys: ["پولکادات", "dot", "polkadot"], code: "dot" },
-  { keys: ["فایل کوین", "fil", "filecoin"], code: "fil" },
-  { keys: ["تون", "ton", "toncoin"], code: "ton" },
-  { keys: ["چین لینک", "link", "chainlink"], code: "link" },
-  { keys: ["مونرو", "xmr", "monero"], code: "xmr" },
-  { keys: ["بیت کوین کش", "bch", "bitcoincash"], code: "bch" },
-];
-
-// Precomputed alias index to reduce work in the hot path.
-const ALIAS_INDEX: Array<{ code: string; spaced: string[]; compact: string[]; maxLen: number }> = (() => {
-  const mapped = ALIASES.map((a) => {
-    const spaced = a.keys
-      .map((k) => stripPunct(norm(String(k))).replace(/\s+/g, " ").trim())
-      .filter(Boolean);
-
-    const compact = spaced.map((k) => k.replace(/\s+/g, "")).filter(Boolean);
-
-    spaced.sort((x, y) => y.length - x.length);
-    compact.sort((x, y) => y.length - x.length);
-
-    const maxLen = Math.max(spaced[0]?.length ?? 0, compact[0]?.length ?? 0);
-    return { code: a.code, spaced, compact, maxLen };
-  });
-
-  mapped.sort((x, y) => y.maxLen - x.maxLen);
-  return mapped;
-})();
-
-
 // -----------------------------
 // Downloader helpers
 // -----------------------------
@@ -522,82 +430,6 @@ function parseNumberLoose(v: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-function extractUnitFromName(name: string) {
-  const m = name.match(/^\s*(\d+)\s*/);
-  if (!m) return { unit: 1, cleanName: name.trim() };
-  const unit = Math.max(1, parseInt(m[1], 10));
-  return { unit, cleanName: name.replace(/^\s*\d+\s*/g, "").trim() };
-}
-
-function normalizeKeyFromTitle(title: string) {
-  const cleaned = stripPunct(title.toLowerCase()).replace(/\s+/g, " ").trim();
-  return cleaned.replace(/\s+/g, "");
-}
-
-const NAME_TO_CODE: Record<string, { code: string; kind: Rate["kind"]; fa: string; emoji: string }> = {
-  "us dollar": { code: "usd", kind: "currency", fa: "دلار آمریکا", emoji: "🇺🇸" },
-  euro: { code: "eur", kind: "currency", fa: "یورو", emoji: "🇪🇺" },
-  "british pound": { code: "gbp", kind: "currency", fa: "پوند انگلیس", emoji: "🇬🇧" },
-  "swiss franc": { code: "chf", kind: "currency", fa: "فرانک سوئیس", emoji: "🇨🇭" },
-  "canadian dollar": { code: "cad", kind: "currency", fa: "دلار کانادا", emoji: "🇨🇦" },
-  "australian dollar": { code: "aud", kind: "currency", fa: "دلار استرالیا", emoji: "🇦🇺" },
-  "swedish krona": { code: "sek", kind: "currency", fa: "کرون سوئد", emoji: "🇸🇪" },
-  "norwegian krone": { code: "nok", kind: "currency", fa: "کرون نروژ", emoji: "🇳🇴" },
-  "russian ruble": { code: "rub", kind: "currency", fa: "روبل روسیه", emoji: "🇷🇺" },
-  "thai baht": { code: "thb", kind: "currency", fa: "بات تایلند", emoji: "🇹🇭" },
-  "singapore dollar": { code: "sgd", kind: "currency", fa: "دلار سنگاپور", emoji: "🇸🇬" },
-  "hong kong dollar": { code: "hkd", kind: "currency", fa: "دلار هنگ‌کنگ", emoji: "🇭🇰" },
-  "azerbaijani manat": { code: "azn", kind: "currency", fa: "منات آذربایجان", emoji: "🇦🇿" },
-  "armenian dram": { code: "amd", kind: "currency", fa: "درام ارمنستان", emoji: "🇦🇲" },
-  "danish krone": { code: "dkk", kind: "currency", fa: "کرون دانمارک", emoji: "🇩🇰" },
-  "uae dirham": { code: "aed", kind: "currency", fa: "درهم امارات", emoji: "🇦🇪" },
-  "japanese yen": { code: "jpy", kind: "currency", fa: "ین ژاپن", emoji: "🇯🇵" },
-  "turkish lira": { code: "try", kind: "currency", fa: "لیر ترکیه", emoji: "🇹🇷" },
-  "chinese yuan": { code: "cny", kind: "currency", fa: "یوان چین", emoji: "🇨🇳" },
-  "ksa riyal": { code: "sar", kind: "currency", fa: "ریال عربستان", emoji: "🇸🇦" },
-  "indian rupee": { code: "inr", kind: "currency", fa: "روپیه هند", emoji: "🇮🇳" },
-  ringgit: { code: "myr", kind: "currency", fa: "رینگیت مالزی", emoji: "🇲🇾" },
-  "afghan afghani": { code: "afn", kind: "currency", fa: "افغانی", emoji: "🇦🇫" },
-  "kuwaiti dinar": { code: "kwd", kind: "currency", fa: "دینار کویت", emoji: "🇰🇼" },
-  "iraqi dinar": { code: "iqd", kind: "currency", fa: "دینار عراق", emoji: "🇮🇶" },
-  "bahraini dinar": { code: "bhd", kind: "currency", fa: "دینار بحرین", emoji: "🇧🇭" },
-  "omani rial": { code: "omr", kind: "currency", fa: "ریال عمان", emoji: "🇴🇲" },
-  "qatari riyal": { code: "qar", kind: "currency", fa: "ریال قطر", emoji: "🇶🇦" },
-
-  "gold gram 18k": { code: "gold_gram_18k", kind: "gold", fa: "گرم طلای ۱۸", emoji: "💰" },
-  "gold mithqal": { code: "gold_mithqal", kind: "gold", fa: "مثقال طلا", emoji: "💰" },
-  "gold ounce": { code: "gold_ounce", kind: "gold", fa: "اونس طلا", emoji: "💰" },
-
-  azadi: { code: "coin_azadi", kind: "gold", fa: "سکه آزادی", emoji: "🪙" },
-  emami: { code: "coin_emami", kind: "gold", fa: "سکه امامی", emoji: "🪙" },
-  "½azadi": { code: "coin_half_azadi", kind: "gold", fa: "نیم سکه", emoji: "🪙" },
-  "¼azadi": { code: "coin_quarter_azadi", kind: "gold", fa: "ربع سکه", emoji: "🪙" },
-  gerami: { code: "coin_gerami", kind: "gold", fa: "سکه گرمی", emoji: "🪙" },
-
-  bitcoin: { code: "btc", kind: "crypto", fa: "بیت‌کوین", emoji: "💎" },
-  ethereum: { code: "eth", kind: "crypto", fa: "اتریوم", emoji: "💎" },
-  "tether usdt": { code: "usdt", kind: "crypto", fa: "تتر", emoji: "💎" },
-  bnb: { code: "bnb", kind: "crypto", fa: "بی‌ان‌بی", emoji: "💎" },
-  xrp: { code: "xrp", kind: "crypto", fa: "ریپل", emoji: "💎" },
-  usdc: { code: "usdc", kind: "crypto", fa: "USDC", emoji: "💎" },
-  solana: { code: "sol", kind: "crypto", fa: "سولانا", emoji: "💎" },
-  tron: { code: "trx", kind: "crypto", fa: "ترون", emoji: "💎" },
-  dogecoin: { code: "doge", kind: "crypto", fa: "دوج‌کوین", emoji: "💎" },
-  cardano: { code: "ada", kind: "crypto", fa: "کاردانو", emoji: "💎" },
-  "bitcoin cash": { code: "bch", kind: "crypto", fa: "بیت‌کوین‌کش", emoji: "💎" },
-  chainlink: { code: "link", kind: "crypto", fa: "چین‌لینک", emoji: "💎" },
-  monero: { code: "xmr", kind: "crypto", fa: "مونرو", emoji: "💎" },
-  stellar: { code: "xlm", kind: "crypto", fa: "استلار", emoji: "💎" },
-  zcash: { code: "zec", kind: "crypto", fa: "زی‌کش", emoji: "💎" },
-  litecoin: { code: "ltc", kind: "crypto", fa: "لایت‌کوین", emoji: "💎" },
-  polkadot: { code: "dot", kind: "crypto", fa: "پولکادات", emoji: "💎" },
-  toncoin: { code: "ton", kind: "crypto", fa: "تون", emoji: "💎" },
-  filecoin: { code: "fil", kind: "crypto", fa: "فایل‌کوین", emoji: "💎" },
-  cosmos: { code: "atom", kind: "crypto", fa: "کازماس", emoji: "💎" },
-};
-
-type GithubPriceRow = { name: string; price: string | number } & Record<string, unknown>;
-
 type FetchRawResult =
   | { kind: "not_modified" }
   | { kind: "ok"; rawText: string; etag?: string | null };
@@ -609,7 +441,7 @@ async function fetchPricesRaw(env: Env): Promise<FetchRawResult> {
 
   const res = await fetch(PRICES_JSON_URL, { headers });
   if (res.status === 304) return { kind: "not_modified" };
-  if (!res.ok) throw new Error(`Failed to fetch merged prices: HTTP ${res.status}`);
+  if (!res.ok) throw new Error(`Failed to fetch rates_v2_latest: HTTP ${res.status}`);
 
   const rawText = await res.text();
   const newEtag = res.headers.get("etag");
@@ -640,170 +472,94 @@ async function buildStoredFromRaw(rawText: string): Promise<{ stored: Stored; ra
 
   const parsed = JSON.parse(rawText) as unknown;
 
-  // Support both formats:
-  // 1) Legacy array format (older merged_prices.json)
-  // 2) New v2 object format: { fetchedAtMs, source, rates: { code: RateLike } }
-  if (Array.isArray(parsed)) {
-    const arr = parsed as GithubPriceRow[];
-    const rates: Record<string, Rate> = {};
-    const fetchedAtMs = Date.now();
-
-    // Discover USD/Toman rate (needed to compute Toman for crypto rows and USD equivalents)
-    let usdToman: number | null = null;
-    for (const row of arr) {
-      if (!row?.name) continue;
-      const { cleanName } = extractUnitFromName(String(row.name));
-      if (cleanName.toLowerCase() === "us dollar") {
-        const n = parseNumberLoose(row.price);
-        if (n != null) usdToman = n;
-        break;
-      }
-    }
-
-    for (const row of arr) {
-      if (!row?.name) continue;
-
-      const { unit, cleanName } = extractUnitFromName(String(row.name));
-      const nameLower = cleanName.toLowerCase();
-      const priceNum = parseNumberLoose(row.price);
-      if (priceNum == null) continue;
-
-      const mapped = NAME_TO_CODE[nameLower];
-      const code = mapped?.code ?? normalizeKeyFromTitle(cleanName);
-
-      let kind: Rate["kind"] = "currency";
-      if (mapped?.kind) kind = mapped.kind;
-      else if (typeof row.price === "number") kind = "crypto";
-      else {
-        const n = nameLower;
-        kind =
-          n.includes("gold") ||
-          n.includes("azadi") ||
-          n.includes("ounce") ||
-          n.includes("mithqal") ||
-          n.includes("emami") ||
-          n.includes("gerami")
-            ? "gold"
-            : "currency";
-      }
-
-      let tomanPrice = priceNum;
-      let usdPrice: number | undefined = undefined;
-      let change24h: number | undefined = undefined;
-
-      // Crypto rows from the upstream JSON often have numeric price (USD)
-      if (typeof row.price === "number") {
-        usdPrice = priceNum;
-        const ch = row.percent_change_24h ?? row.change24h ?? row.change_24h ?? null;
-        const chNum = typeof ch === "number" ? ch : parseNumberLoose(ch);
-        if (chNum != null) change24h = chNum;
-
-        // If we have USD/Toman rate, compute local price.
-        if (usdToman) tomanPrice = usdPrice * usdToman;
-      }
-
-      const rate: Rate = {
-        price: tomanPrice,
-        unit,
-        kind,
-        title: mapped?.title ?? cleanName,
-        fa: mapped?.fa ?? cleanName,
-        emoji: mapped?.emoji ?? "",
-      };
-
-      if (usdPrice != null) rate.usdPrice = usdPrice;
-      if (change24h != null) rate.change24h = change24h;
-
-      rates[code] = rate;
-    }
-
-    const stored: Stored = { fetchedAtMs, source: PRICES_JSON_URL, rates };
-    return { stored, rawHash };
-  }
-
   const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
-  if (isRecord(parsed) && isRecord(parsed.rates)) {
-    const p = parsed as Record<string, unknown>;
-    const ratesIn = p.rates as Record<string, unknown>;
-
-    const fetchedAtMsRaw = p.fetchedAtMs;
-    const fetchedAtMs = typeof fetchedAtMsRaw === "number" && Number.isFinite(fetchedAtMsRaw) && fetchedAtMsRaw > 0 ? fetchedAtMsRaw : Date.now();
-    const source = typeof p.source === "string" && p.source ? (p.source as string) : PRICES_JSON_URL;
-    const timestamp = typeof p.timestamp === "string" ? (p.timestamp as string) : undefined;
-
-    const rates: Record<string, Rate> = {};
-    for (const [code, r0] of Object.entries(ratesIn)) {
-      if (!isRecord(r0)) continue;
-
-      const kind = r0.kind;
-      if (kind !== "currency" && kind !== "gold" && kind !== "crypto") continue;
-
-      const priceNum = parseNumberLoose(r0.price);
-      if (priceNum == null) continue;
-
-      const unitNum = parseNumberLoose(r0.unit);
-      const unit = unitNum != null && Number.isFinite(unitNum) && unitNum >= 1 ? Math.trunc(unitNum) : 1;
-
-      const title = typeof r0.title === "string" ? (r0.title as string) : "";
-      const fa = typeof r0.fa === "string" ? (r0.fa as string) : "";
-      const emoji = typeof r0.emoji === "string" ? (r0.emoji as string) : "";
-
-      const rate: Rate = { price: priceNum, unit, kind, title, fa, emoji };
-
-      const usdPrice = parseNumberLoose(r0.usdPrice);
-      if (usdPrice != null) rate.usdPrice = usdPrice;
-
-      const change24h = parseNumberLoose(r0.change24h);
-      if (change24h != null) rate.change24h = change24h;
-
-      const aliases = r0.aliases;
-      if (Array.isArray(aliases)) {
-        const cleaned = aliases.filter((x) => typeof x === "string" && x.trim()).map((x) => (x as string).trim());
-        if (cleaned.length) rate.aliases = cleaned;
-      }
-
-      const inputMode = r0.inputMode;
-      if (inputMode === "native" || inputMode === "pack") rate.inputMode = inputMode;
-
-      rates[code] = rate;
-    }
-
-    const stored: Stored = { fetchedAtMs, source, rates };
-    if (timestamp) stored.timestamp = timestamp;
-    return { stored, rawHash };
+  if (!isRecord(parsed) || !isRecord((parsed as any).rates)) {
+    throw new Error("invalid_prices_payload");
   }
 
-  throw new Error("unsupported_prices_payload");
+  const p = parsed as Record<string, unknown>;
+  const ratesIn = p.rates as Record<string, unknown>;
+
+  const fetchedAtMsRaw = p.fetchedAtMs;
+  const fetchedAtMs =
+    typeof fetchedAtMsRaw === "number" && Number.isFinite(fetchedAtMsRaw) && fetchedAtMsRaw > 0 ? fetchedAtMsRaw : Date.now();
+
+  const source = typeof p.source === "string" && p.source ? (p.source as string) : PRICES_JSON_URL;
+  const timestamp = typeof p.timestamp === "string" ? (p.timestamp as string) : undefined;
+
+  const rates: Record<string, Rate> = {};
+
+  for (const [code, r0] of Object.entries(ratesIn)) {
+    if (!isRecord(r0)) continue;
+
+    const kind = r0.kind;
+    if (kind !== "currency" && kind !== "gold" && kind !== "crypto") continue;
+
+    const priceNum = parseNumberLoose(r0.price);
+    if (priceNum == null) continue;
+
+    const unitNum = parseNumberLoose(r0.unit);
+    const unit = unitNum != null && Number.isFinite(unitNum) && unitNum >= 1 ? Math.trunc(unitNum) : 1;
+
+    const meta = kind === "crypto" ? CRYPTO_META[code] : META[code];
+
+    const titleRaw = typeof r0.title === "string" ? (r0.title as string) : "";
+    const faRaw = typeof r0.fa === "string" ? (r0.fa as string) : "";
+    const emojiRaw = typeof r0.emoji === "string" ? (r0.emoji as string) : "";
+
+    const fa = faRaw || meta?.fa || code;
+    const emoji = emojiRaw || meta?.emoji || "";
+    const title = titleRaw || fa;
+
+    const rate: Rate = { price: priceNum, unit, kind, title, fa, emoji };
+
+    const usdPrice = parseNumberLoose(r0.usdPrice);
+    if (usdPrice != null) rate.usdPrice = usdPrice;
+
+    const change24h = parseNumberLoose(r0.change24h);
+    if (change24h != null) rate.change24h = change24h;
+
+    const aliases = r0.aliases;
+    if (Array.isArray(aliases)) {
+      const cleaned = aliases.filter((x) => typeof x === "string" && x.trim()).map((x) => (x as string).trim());
+      if (cleaned.length) rate.aliases = cleaned;
+    }
+
+    const inputMode = r0.inputMode;
+    if (inputMode === "native" || inputMode === "pack") rate.inputMode = inputMode;
+
+    rates[code] = rate;
+  }
+
+  const stored: Stored = { fetchedAtMs, source, rates };
+  if (timestamp) stored.timestamp = timestamp;
+
+  return { stored, rawHash };
 }
+
 
 async function refreshRates(env: Env) {
   const now = Date.now();
 
-  // Best-effort lock to avoid concurrent refreshes (scheduled + manual).
-  const lock = await env.BOT_KV.get(KEY_REFRESH_LOCK);
-  if (lock) {
-    const prevTxt = await env.BOT_KV.get(KEY_RATES, "text");
-    const prevCount = prevTxt ? Object.keys((JSON.parse(prevTxt) as Stored).rates || {}).length : 0;
-    return { ok: true, changed: false, count: prevCount };
-  }
-  await env.BOT_KV.put(KEY_REFRESH_LOCK, String(now), { expirationTtl: REFRESH_LOCK_TTL_SEC });
-
-  let prevStored: Stored | null = null;
+  // Read previous payload for status/debug only (do not fail refresh if it's missing/corrupt).
   let prevTxt: string | null = null;
+  let prevCount = 0;
   try {
     prevTxt = await env.BOT_KV.get(KEY_RATES, "text");
-    if (prevTxt) prevStored = JSON.parse(prevTxt) as Stored;
+    if (prevTxt) {
+      const prev = JSON.parse(prevTxt) as Stored;
+      prevCount = Object.keys(prev.rates || {}).length;
+    }
   } catch {
-    prevStored = null;
+    prevTxt = null;
+    prevCount = 0;
   }
-  const prevCount = prevStored ? Object.keys(prevStored.rates || {}).length : 0;
 
   try {
     const fetched = await fetchPricesRaw(env);
 
     if (fetched.kind === "not_modified") {
-      // No upstream changes; do NOT rewrite rates KV.
       await env.BOT_KV
         .put(KEY_REFRESH_STATUS, JSON.stringify({ ok: true, changed: false, at: now, note: "not_modified", count: prevCount }), {
           expirationTtl: 24 * 3600,
@@ -821,23 +577,15 @@ async function refreshRates(env: Env) {
     const changed = prevHash !== rawHash;
 
     if (changed || !prevTxt) {
-      if (prevTxt) {
-        // Backup previous good payload before overwriting.
-        await env.BOT_KV.put(KEY_BACKUP, prevTxt, { expirationTtl: 7 * 24 * 3600 }).catch(() => {});
-      }
-
       const serialized = JSON.stringify(stored);
       await env.BOT_KV.put(KEY_RATES, serialized);
-
-      // Write metadata after the payload (safer if a deploy/refresh is interrupted mid-way).
       await env.BOT_KV.put(KEY_HASH, rawHash);
       if (fetched.etag) await env.BOT_KV.put(KEY_ETAG, fetched.etag);
 
-      // Update in-isolate cache immediately (saves next KV read).
+      // update in-isolate cache immediately
       RUNTIME_RATES_CACHE = { stored, alias: buildAliasMaps(stored), loadedAtMs: Date.now() };
     } else {
-      // Ensure rates exist even if hash says unchanged (rare).
-      if (!prevTxt) await env.BOT_KV.put(KEY_RATES, JSON.stringify(stored));
+      // Upstream unchanged, but keep ETag fresh if present
       if (fetched.etag) await env.BOT_KV.put(KEY_ETAG, fetched.etag);
     }
 
@@ -851,7 +599,6 @@ async function refreshRates(env: Env) {
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
 
-    // Never overwrite KEY_RATES on failure. Just record status.
     await env.BOT_KV
       .put(KEY_REFRESH_STATUS, JSON.stringify({ ok: false, changed: false, at: now, error: msg, count: prevCount }), {
         expirationTtl: 24 * 3600,
@@ -861,6 +608,7 @@ async function refreshRates(env: Env) {
     throw e;
   }
 }
+
 
 async function getStoredOrRefresh(env: Env, ctx: ExecutionContext): Promise<Stored> {
   const now = Date.now();
@@ -1032,37 +780,28 @@ function findCode(textNorm: string, rates: Record<string, Rate>, alias?: AliasMa
   const cleaned = stripPunct(textNorm).replace(/\s+/g, " ").trim();
   const compact = cleaned.replace(/\s+/g, "");
 
-  // O(1) exact matches first (fast + improves recognition of full names).
+  // 1) exact/compact full-string matches
   if (alias) {
     const direct = alias.exact.get(cleaned) ?? alias.compact.get(compact);
     if (direct && rates[direct]) return direct;
   }
 
-  for (const a of ALIAS_INDEX) {
-    for (const k of a.spaced) {
-      if (hasBounded(cleaned, k)) return a.code;
-    }
-    for (const k of a.compact) {
-      if (hasBounded(compact, k)) return a.code;
+  // 2) bounded scan inside the sentence (works for inputs like "100 دلار")
+  if (alias) {
+    for (const a of alias.scan) {
+      if (a.spaced && hasBounded(cleaned, a.spaced)) return a.code;
+      if (a.compact && hasBounded(compact, a.compact)) return a.code;
     }
   }
 
-  if (
-    hasBounded(cleaned, "دلار") &&
-    (hasBounded(cleaned, "کانادا") || hasBounded(cleaned, "کاندا") || hasBounded(cleaned, "کانادایی") || hasBounded(cleaned, "کاندایی"))
-  ) {
-    if (rates["cad"]) return "cad";
-  }
-  if (hasBounded(cleaned, "دینار") && (hasBounded(cleaned, "عراق") || hasBounded(cleaned, "عراقی"))) {
-    if (rates["iqd"]) return "iqd";
-  }
-
+  // 3) plain code match anywhere (usd, btc, ...)
   const m = cleaned.match(/\b([a-z]{3,10})\b/i);
   if (m) {
     const candidate = m[1].toLowerCase();
     if (rates[candidate]) return candidate;
   }
 
+  // 4) fallback: compare against rate titles (no aliases)
   for (const key in rates) {
     const t = rates[key]?.title ? stripPunct(norm(rates[key].title)).replace(/\s+/g, "") : "";
     if (compact === key || (t && compact === t)) return key;
@@ -1070,6 +809,7 @@ function findCode(textNorm: string, rates: Record<string, Rate>, alias?: AliasMa
 
   return null;
 }
+
 
 function extractAmountOrNull(textNorm: string): number | null {
   const cleaned = stripPunct(textNorm).replace(/\s+/g, " ").trim();
