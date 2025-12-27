@@ -308,7 +308,7 @@ function buildAliasIndexCache(stored: Stored): AliasIndexCache {
   }
 
   // Always allow matching by the code itself (usd, btc, ...), even if missing in aliasIndex.
- (usd, btc, ...), even if missing in aliasIndex.
+ // (usd, btc, ...), even if missing in aliasIndex.
   for (const code in stored.rates) add(code, code);
 
   scan.sort((a, b) => b.length - a.length);
