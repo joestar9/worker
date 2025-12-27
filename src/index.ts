@@ -366,6 +366,130 @@ async function fetchCobalt(baseUrl: string, targetUrl: string): Promise<unknown>
   return apiRes.json();
 }
 
+function extractTweetId(url: string): string | null {
+  try {
+    const u = new URL(url);
+    const m = u.pathname.match(/\/status\/(\d+)/);
+    return m?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+type TwitterMediaItem = { type: "photo" | "video"; url: string };
+
+function pickBestMp4Variant(variants: any[] | undefined): string | null {
+  if (!variants || !Array.isArray(variants)) return null;
+  let best: any | null = null;
+  for (const v of variants) {
+    if (!v || typeof v.url !== "string") continue;
+    if (v.content_type && v.content_type !== "video/mp4") continue;
+    if (!best) best = v;
+    else {
+      const b1 = typeof best.bitrate === "number" ? best.bitrate : -1;
+      const b2 = typeof v.bitrate === "number" ? v.bitrate : -1;
+      if (b2 > b1) best = v;
+    }
+  }
+  return best?.url ?? null;
+}
+
+function parseTwitterSyndicationMedia(d: unknown): TwitterMediaItem[] {
+  const out: TwitterMediaItem[] = [];
+  if (!d || typeof d !== "object") return out;
+  const anyD: any = d as any;
+
+  const mediaDetails: any[] | undefined = anyD.mediaDetails ?? anyD.media_details ?? anyD.media;
+  if (Array.isArray(mediaDetails)) {
+    for (const m of mediaDetails) {
+      const t = (m?.type ?? m?.media_type ?? "").toString().toLowerCase();
+      const photoUrl = m?.media_url_https ?? m?.media_url ?? m?.url;
+      if (t === "photo" && typeof photoUrl === "string") {
+        // prefer original size if possible
+        out.push({ type: "photo", url: photoUrl.includes("?") ? photoUrl : `${photoUrl}?name=orig` });
+        continue;
+      }
+
+      if ((t === "video" || t === "animated_gif" || t === "gif") && typeof m === "object") {
+        const variants = m?.video_info?.variants ?? m?.videoInfo?.variants ?? m?.variants ?? anyD?.video?.variants;
+        const best = pickBestMp4Variant(variants);
+        if (best) out.push({ type: "video", url: best });
+      }
+    }
+  }
+
+  // fallback: some payloads include a top-level `video` with `variants`
+  if (out.length === 0) {
+    const best = pickBestMp4Variant(anyD?.video?.variants);
+    if (best) out.push({ type: "video", url: best });
+  }
+
+  return out;
+}
+
+async function tgSendMediaGroup(
+  env: Env,
+  chatId: number,
+  media: Array<{ type: "photo" | "video"; media: string }>,
+  replyTo?: number,
+) {
+  const body: Record<string, unknown> = { chat_id: chatId, media };
+  if (replyTo) {
+    body.reply_to_message_id = replyTo;
+    body.allow_sending_without_reply = true;
+  }
+  await tgCall(env, "sendMediaGroup", body);
+}
+
+async function handleTwitterSyndicationDownload(env: Env, chatId: number, targetUrl: string, replyTo?: number) {
+  // show user we're working
+  await fetch(`${tgBase(env)}/sendChatAction`, {
+    method: "POST",
+    headers: TG_JSON_HEADERS,
+    body: JSON.stringify({ chat_id: chatId, action: "upload_video" }),
+  }).catch(() => {});
+
+  const tweetId = extractTweetId(targetUrl);
+  if (!tweetId) {
+    await tgSend(env, chatId, "❌ لینک توییتر معتبر نیست.", replyTo);
+    return true;
+  }
+
+  const apiUrl = `https://cdn.syndication.twimg.com/tweet-result?id=${tweetId}&lang=en`;
+  const res = await fetch(apiUrl, {
+    headers: { "User-Agent": "Mozilla/5.0" },
+    cf: { cacheTtl: 60, cacheEverything: true },
+  });
+
+  if (!res.ok) {
+    await tgSend(env, chatId, "❌ نتونستم اطلاعات توییت رو بگیرم (ممکنه پرایوت/حذف شده باشه).", replyTo);
+    return true;
+  }
+
+  const data = await res.json().catch(() => null);
+  const items = parseTwitterSyndicationMedia(data).slice(0, 10);
+
+  if (items.length === 0) {
+    await tgSend(env, chatId, "❌ این توییت مدیا قابل دانلود نداره یا محدود شده.", replyTo);
+    return true;
+  }
+
+  if (items.length === 1) {
+    const it = items[0];
+    if (it.type === "video") await tgSendVideo(env, chatId, it.url, "", replyTo);
+    else await tgSendPhoto(env, chatId, it.url, "", replyTo);
+    return true;
+  }
+
+  await tgSendMediaGroup(
+    env,
+    chatId,
+    items.map((it) => ({ type: it.type, media: it.url })),
+    replyTo,
+  );
+  return true;
+}
+
 async function handleCobaltPublicDownload(env: Env, chatId: number, targetUrl: string, replyTo?: number) {
   // show user we're working
   await fetch(`${tgBase(env)}/sendChatAction`, {
@@ -1486,7 +1610,15 @@ export default {
     const run = async () => {
       const downloadUrl = pickCobaltUrl(text);
       if (downloadUrl) {
-        await handleCobaltPublicDownload(env, chatId, downloadUrl, replyTo);
+        let host = "";
+        try {
+          host = new URL(downloadUrl).hostname.toLowerCase();
+        } catch {}
+        if (host === "twitter.com" || host.endsWith(".twitter.com") || host === "x.com" || host.endsWith(".x.com")) {
+          await handleTwitterSyndicationDownload(env, chatId, downloadUrl, replyTo);
+        } else {
+          await handleCobaltPublicDownload(env, chatId, downloadUrl, replyTo);
+        }
         return;
       }
 
