@@ -47,7 +47,7 @@ const PRICES_CACHE_TTL_SECONDS = 15 * 60; // caches.default TTL per PoP
 const PRICES_CACHE_KEY = new Request(PRICES_JSON_URL, { method: "GET" });
 
 const RATES_CACHE_TTL_MS = 60_000; // memory cache per isolate
-const STALE_REFRESH_MS = 35 * 60_000;
+const STALE_REFRESH_MS = 30 * 60_000; // you update prices every ~25 minutes
 
 // Parsing caches
 const PARSE_TTL_MS = 15_000;
@@ -287,6 +287,10 @@ function buildAliasIndexCache(stored: Stored): AliasIndexCache {
       seen.add(n.spaced);
       scan.push(n.spaced);
     }
+    if (n.compact && n.compact !== n.spaced && !seen.has(n.compact)) {
+      seen.add(n.compact);
+      scan.push(n.compact);
+    }
   };
 
   const idx = stored.aliasIndex || {};
@@ -308,7 +312,6 @@ function buildAliasIndexCache(stored: Stored): AliasIndexCache {
   }
 
   // Always allow matching by the code itself (usd, btc, ...), even if missing in aliasIndex.
- // (usd, btc, ...), even if missing in aliasIndex.
   for (const code in stored.rates) add(code, code);
 
   scan.sort((a, b) => b.length - a.length);
@@ -397,7 +400,7 @@ async function processCobaltResponse(env: Env, chatId: number, data: unknown, re
 
   if (d?.status === "error") throw new Error((d as any)?.text || "Cobalt Error");
   if (d?.status === "stream" || d?.status === "redirect") {
-    await tgSendVideo(env, chatId, (d as any).url, "✅ دانلود شد", replyTo);
+    await tgSendVideo(env, chatId, (d as any).url, "@worker093578bot ✅", replyTo);
     return;
   }
   if (d?.status === "picker" && Array.isArray((d as any).picker) && (d as any).picker.length > 0) {
@@ -434,7 +437,7 @@ async function fetchPricesRaw(): Promise<string> {
   const res = await fetch(PRICES_JSON_URL, {
     headers,
     // enable Cloudflare fetch caching as an extra layer
-    cf: { cacheEverything: true, cacheTtl: 1800 },
+    cf: { cacheEverything: true, cacheTtl: PRICES_CACHE_TTL_SECONDS },
   } as RequestInit & { cf?: unknown });
 
   if (!res.ok) throw new Error(`Failed to fetch rates_v2_latest: HTTP ${res.status}`);
@@ -767,7 +770,7 @@ function escapeRegExp(s: string) {
 
 function hasBounded(haystack: string, needle: string) {
   if (!needle) return false;
-  const re = new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(needle)}(?![\\p{L}\\p{N}])`, "iu");
+  const re = new RegExp(`(?<![\\p{L}])${escapeRegExp(needle)}(?![\\p{L}])`, "iu");
   return re.test(haystack);
 }
 
@@ -781,12 +784,13 @@ function findCode(textNorm: string, rates: Record<string, Rate>, alias?: AliasIn
     if (direct && rates[direct]) return direct;
   }
 
-  // 2) bounded scan inside the sentence (works for inputs like "100 دلار")
+  // 2) bounded scan inside the sentence (works for inputs like "100 دلار" and "دلار100")
   if (alias) {
     for (const needle of alias.scan) {
       if (needle.length < 2) continue;
-      if (hasBounded(cleaned, needle)) {
-        const code = alias.exact.get(needle);
+      // Check both spaced and compact haystacks; this supports inputs like "100دلار" / "دلار100".
+      if (hasBounded(cleaned, needle) || hasBounded(compact, needle)) {
+        const code = alias.exact.get(needle) ?? alias.compact.get(needle);
         if (code && rates[code]) return code;
       }
     }
@@ -822,6 +826,47 @@ function extractAmountOrNull(textNorm: string): number | null {
 const parseCache = new Map<string, { ts: number; code: string | null; amount: number; hasAmount: boolean }>();
 const userContext = new Map<number, { ts: number; code: string }>();
 
+const AMOUNT_ONLY_WORDS = new Set([
+  "و",
+  // ones
+  "یک","یه","دو","سه","چهار","پنج","شش","شیش","هفت","هشت","نه",
+  // teens
+  "ده","یازده","دوازده","سیزده","چهارده","پانزده","شانزده","هفده","هجده","نوزده",
+  // tens
+  "بیست","سی","چهل","پنجاه","شصت","هفتاد","هشتاد","نود",
+  // hundreds
+  "صد","یکصد","دویست","سیصد","چهارصد","پانصد","ششصد","شیشصد","هفتصد","هشتصد","نهصد",
+  // scales
+  "هزار","میلیون","ملیون","میلیارد","بیلیون","تریلیون",
+  // latin scales
+  "k","m","b",
+]);
+
+function isAmountOnlyQuery(textNorm: string): boolean {
+  const cleaned = stripPunct(textNorm).replace(/\s+/g, " ").trim();
+  if (!cleaned) return false;
+  const tokens = cleaned.split(" ").filter(Boolean);
+  for (const tok0 of tokens) {
+    const tok = tok0.toLowerCase();
+    if (AMOUNT_ONLY_WORDS.has(tok)) continue;
+
+    const t = tok.replace(/,/g, "");
+    // pure digits (or decimal)
+    if (/^\d+(?:\.\d+)?$/.test(t)) continue;
+
+    // digits + scale suffix without space (e.g. 100k, 2.5m)
+    if (/^\d+(?:\.\d+)?(?:k|m|b)$/.test(t)) continue;
+
+    // digits + Persian scale without space (e.g. 100هزار)
+    if (/^\d+(?:\.\d+)?(?:هزار|میلیون|ملیون|میلیارد|بیلیون|تریلیون)$/.test(t)) continue;
+
+    // Any other token means user likely typed a currency/keyword; do NOT reuse context.
+    return false;
+  }
+  return true;
+}
+
+
 function pruneParseCache(now: number) {
   if (parseCache.size <= PARSE_CACHE_MAX) return;
   const keys: string[] = [];
@@ -853,7 +898,7 @@ function getParsedIntent(userId: number, textNorm: string, rates: Record<string,
 
   if (!code) {
     const ctx = userContext.get(userId);
-    if (ctx && now - ctx.ts <= CONTEXT_TTL_MS && hasAmount) code = ctx.code;
+    if (ctx && now - ctx.ts <= CONTEXT_TTL_MS && hasAmount && isAmountOnlyQuery(textNorm)) code = ctx.code;
   }
 
   if (code) userContext.set(userId, { ts: now, code });
