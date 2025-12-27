@@ -1864,11 +1864,21 @@ export default {
     const isGroup = msg?.chat?.type === "group" || msg?.chat?.type === "supergroup";
     const replyTo = isGroup ? messageId : undefined;
 
+    // Cloudflare KV enforces expirationTtl >= 60 seconds. We still want a short cooldown
+    // to avoid duplicate processing, so we store the request time and compare it ourselves.
+    // KV TTL is used only for cleanup.
+    const COOLDOWN_SECONDS = 5;
     const cooldownKey = `cooldown:${userId}`;
-    const inCooldown = await env.BOT_KV.get(cooldownKey);
-    if (inCooldown) return new Response("ok");
+    const lastSeenRaw = await env.BOT_KV.get(cooldownKey);
+    if (lastSeenRaw) {
+      const lastSeen = Number(lastSeenRaw);
+      if (Number.isFinite(lastSeen) && nowSec - lastSeen < COOLDOWN_SECONDS) {
+        return new Response("ok");
+      }
+    }
 
-    ctx.waitUntil(env.BOT_KV.put(cooldownKey, "1", { expirationTtl: 5 }));
+    // Keep KV key around long enough to cover short bursts; enforce minimum TTL.
+    ctx.waitUntil(env.BOT_KV.put(cooldownKey, String(nowSec), { expirationTtl: 60 }));
 
     const textNorm = norm(text);
     const cmd = normalizeCommand(textNorm);
@@ -1973,5 +1983,3 @@ function computeDefaultListsFromRates(rates: Record<string, Rate>): { fiat: stri
 
   return { fiat: [...goldCodes, ...currencyCodes], crypto: cryptoCodes };
 }
-
-
