@@ -543,23 +543,6 @@ const TW_HTML_HEADERS: Record<string, string> = {
 
 type TwitterMediaItem = { type: "photo" | "video"; url: string };
 
-function extractTweetScreenName(url: string): string | null {
-  try {
-    const u = new URL(url);
-    // /{screen_name}/status/{id}
-    const m = u.pathname.match(/^\/([^\/]+)\/(?:i\/)?status\/(\d+)/) ?? u.pathname.match(/^\/([^\/]+)\/statuses\/(\d+)/);
-    const screen = m?.[1];
-    if (!screen) return null;
-    // ignore non-user paths
-    if (screen === "i" || screen === "home" || screen === "search" || screen === "share") return null;
-    return screen;
-  } catch {
-    return null;
-  }
-}
-
-
-
 function parseTwitterMediaAny(d: unknown): TwitterMediaItem[] {
   // Syndication-only (no third-party JSON APIs)
   return parseTwitterSyndicationMedia(d);
@@ -633,8 +616,8 @@ async function tgSendMediaGroup(
 }
 
 async function handleTwitterSyndicationDownload(env: Env, chatId: number, targetUrl: string, replyTo?: number) {
-  // show user we're working
-  await fetch(`${tgBase(env)}/sendChatAction`, {
+  // Show user we're working
+  void fetch(`${tgBase(env)}/sendChatAction`, {
     method: "POST",
     headers: TG_JSON_HEADERS,
     body: JSON.stringify({ chat_id: chatId, action: "upload_video" }),
@@ -643,15 +626,20 @@ async function handleTwitterSyndicationDownload(env: Env, chatId: number, target
   // 1) Normalize/resolve URL (supports t.co and other redirectors)
   let resolvedUrl = await resolveFinalUrl(targetUrl);
 
-  // 2) Try extracting tweet id from the URL path
+  // 2) Extract tweet id from URL path
   let tweetId = extractTweetId(resolvedUrl);
 
-  // 3) Fallback: fetch HTML once and extract from canonical/og:url/etc (still without Cobalt)
+  // 3) Fallback: fetch HTML once and extract from canonical/og:url/etc (still without third‑party APIs)
   if (!tweetId) {
     try {
-      const htmlRes = await fetchWithRetry(resolvedUrl, { method: "GET", redirect: "follow", headers: TW_HTML_HEADERS }, 2, 250);
-      // Prefer the final URL after redirect
-      if (htmlRes?.url) {
+      const htmlRes = await fetchWithRetry(
+        resolvedUrl,
+        { method: "GET", redirect: "follow", headers: TW_HTML_HEADERS },
+        2,
+        250,
+      );
+
+      if (htmlRes.url) {
         resolvedUrl = htmlRes.url;
         tweetId = extractTweetId(resolvedUrl);
       }
@@ -660,7 +648,9 @@ async function handleTwitterSyndicationDownload(env: Env, chatId: number, target
         const html = await htmlRes.text();
         tweetId = extractTweetIdFromHtml(html);
       }
-    } catch {}
+    } catch {
+      // ignore
+    }
   }
 
   if (!tweetId) {
@@ -668,48 +658,46 @@ async function handleTwitterSyndicationDownload(env: Env, chatId: number, target
     return true;
   }
 
+  const endpoints = [
+    `https://cdn.syndication.twimg.com/tweet-result?id=${tweetId}&lang=en`,
+    `https://cdn.syndication.twimg.com/tweet-result?id=${tweetId}`,
+  ];
 
-const endpoints = [
-  `https://cdn.syndication.twimg.com/tweet-result?id=${tweetId}&lang=en`,
-  `https://cdn.syndication.twimg.com/tweet-result?id=${tweetId}`,
-];
+  let data: unknown = null;
+  let lastStatus = 0;
 
-let data: unknown = null;
-let lastStatus = 0;
+  // 4) Try a few rounds before giving up (temporary rate limits / flakiness are common)
+  for (let round = 0; round < 3 && !data; round++) {
+    for (const apiUrl of endpoints) {
+      try {
+        const res = await fetchWithRetry(
+          apiUrl,
+          {
+            method: "GET",
+            headers: {
+              "user-agent": TW_HTML_HEADERS["user-agent"],
+              accept: "application/json,text/plain,*/*",
+            },
+            cf: { cacheTtl: 120, cacheEverything: true },
+          } as any,
+          3,
+          300,
+        );
 
-// Try a few rounds before giving up (temporary rate limits / flakiness are common)
-for (let round = 0; round < 3 && !data; round++) {
-  for (const apiUrl of endpoints) {
-    try {
-      const res = await fetchWithRetry(
-        apiUrl,
-        {
-          method: "GET",
-          headers: {
-            "user-agent": TW_HTML_HEADERS["user-agent"],
-            accept: "application/json,text/plain,*/*",
-          },
-          cf: { cacheTtl: 120, cacheEverything: true },
-        } as any,
-        3,
-        300,
-      );
+        lastStatus = res.status;
+        if (!res.ok) continue;
 
-      lastStatus = res.status;
+        data = await res.json();
+        break;
+      } catch {
+        // try next endpoint / round
+      }
+    }
 
-      if (!res.ok) continue;
-      data = await res.json();
-      break;
-    } catch {}
+    if (!data && round < 2) await sleepMs(250 * 2 ** round);
   }
-
-  if (!data && round < 2) {
-    await sleepMs(250 * (2 ** round));
-  }
-}
 
   if (!data) {
-    // common reasons: private tweet / deleted / region-locked / temporary block
     const msg =
       lastStatus === 404
         ? "❌ این توییت پیدا نشد (ممکنه حذف شده باشه)."
@@ -720,107 +708,39 @@ for (let round = 0; round < 3 && !data; round++) {
     return true;
   }
 
-  // Parse media from syndication payload.
+  // 5) Parse media from syndication payload
   const items = parseTwitterMediaAny(data).slice(0, 10);
-
-if (items.length === 0) {
-
-
-  // Fallback: scrape embed-fixer HTML meta tags (og:video / twitter:player:stream).
-
-
-  // Retry a few times because these sources can be flaky / temporarily rate-limited.
-
-
-  let fixerItems: TwitterMediaItem[] = [];
-
-
-  for (let round = 0; round < 3 && fixerItems.length === 0; round++) {
-
-
-    fixerItems = await fetchFixerHtmlMedia(tweetId);
-
-
-    if (fixerItems.length === 0 && round < 2) await sleepMs(250 * (2 ** round));
-
-
-  }
-
-
-  if (fixerItems.length) {
-
-
-    if (fixerItems.length === 1) {
-
-
-      const it = fixerItems[0];
-
-
-      if (it.type === 'video') await tgSendVideo(env, chatId, it.url, '', replyTo);
-
-
-      else await tgSendPhoto(env, chatId, it.url, '', replyTo);
-
-
+  if (items.length > 0) {
+    if (items.length === 1) {
+      const it = items[0];
+      if (it.type === "video") await tgSendVideo(env, chatId, it.url, "", replyTo);
+      else await tgSendPhoto(env, chatId, it.url, "", replyTo);
       return true;
-
-
     }
-
-
-
-
 
     await tgSendMediaGroup(
-
-
       env,
-
-
       chatId,
-
-
-      fixerItems.slice(0, 10).map((it) => ({ type: it.type, media: it.url })),
-
-
+      items.map((it) => ({ type: it.type, media: it.url })),
       replyTo,
-
-
     );
-
-
-    return true;
-
-
-  }
-
-
-
-
-
-  await tgSend(env, chatId, '❌ این توییت مدیا قابل دانلود نداره یا محدود شده.', replyTo);
-
-
-  return true;
-
-
-}
-
-      await tgSendMediaGroup(
-        env,
-        chatId,
-        fixerItems.slice(0, 10).map((it) => ({ type: it.type, media: it.url })),
-        replyTo,
-      );
-      return true;
-    }
-
-    await tgSend(env, chatId, '❌ این توییت مدیا قابل دانلود نداره یا محدود شده.', replyTo);
     return true;
   }
 
-  if (items.length === 1) {
-    const it = items[0];
+  // 6) Fallback: scrape embed-fixer HTML meta tags (og:video / twitter:player:stream), with retries
+  let fixerItems: TwitterMediaItem[] = [];
+  for (let round = 0; round < 3 && fixerItems.length === 0; round++) {
+    fixerItems = await fetchFixerHtmlMedia(tweetId);
+    if (fixerItems.length === 0 && round < 2) await sleepMs(250 * 2 ** round);
+  }
+
+  if (fixerItems.length === 0) {
+    await tgSend(env, chatId, "❌ این توییت مدیا قابل دانلود نداره یا محدود شده.", replyTo);
+    return true;
+  }
+
+  if (fixerItems.length === 1) {
+    const it = fixerItems[0];
     if (it.type === "video") await tgSendVideo(env, chatId, it.url, "", replyTo);
     else await tgSendPhoto(env, chatId, it.url, "", replyTo);
     return true;
@@ -829,11 +749,12 @@ if (items.length === 0) {
   await tgSendMediaGroup(
     env,
     chatId,
-    items.map((it) => ({ type: it.type, media: it.url })),
+    fixerItems.slice(0, 10).map((it) => ({ type: it.type, media: it.url })),
     replyTo,
   );
   return true;
 }
+
 
 async function handleCobaltPublicDownload(env: Env, chatId: number, targetUrl: string, replyTo?: number) {
   // show user we're working
@@ -2052,3 +1973,5 @@ function computeDefaultListsFromRates(rates: Record<string, Rate>): { fiat: stri
 
   return { fiat: [...goldCodes, ...currencyCodes], crypto: cryptoCodes };
 }
+
+
