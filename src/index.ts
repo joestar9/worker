@@ -112,6 +112,9 @@ type Rate = {
   fa: string;
   usdPrice?: number;
   change24h?: number;
+  // Optional improvements from upstream JSON (safe to ignore if absent)
+  aliases?: string[];
+  inputMode?: "pack" | "native";
 };
 
 type Stored = {
@@ -635,95 +638,143 @@ function validateStored(stored: Stored): string | null {
 async function buildStoredFromRaw(rawText: string): Promise<{ stored: Stored; rawHash: string }> {
   const rawHash = await sha256Hex(rawText);
 
-  const arr = JSON.parse(rawText) as GithubPriceRow[];
-  const rates: Record<string, Rate> = {};
-  const fetchedAtMs = Date.now();
+  const parsed = JSON.parse(rawText) as unknown;
 
-  // Discover USD/Toman rate (needed to compute Toman for crypto rows and USD equivalents)
-  let usdToman: number | null = null;
-  for (const row of arr) {
-    if (!row?.name) continue;
-    const { cleanName } = extractUnitFromName(String(row.name));
-    if (cleanName.toLowerCase() === "us dollar") {
-      const n = parseNumberLoose(row.price);
-      if (n != null) usdToman = n;
-      break;
+  // Support both formats:
+  // 1) Legacy array format (older merged_prices.json)
+  // 2) New v2 object format: { fetchedAtMs, source, rates: { code: RateLike } }
+  if (Array.isArray(parsed)) {
+    const arr = parsed as GithubPriceRow[];
+    const rates: Record<string, Rate> = {};
+    const fetchedAtMs = Date.now();
+
+    // Discover USD/Toman rate (needed to compute Toman for crypto rows and USD equivalents)
+    let usdToman: number | null = null;
+    for (const row of arr) {
+      if (!row?.name) continue;
+      const { cleanName } = extractUnitFromName(String(row.name));
+      if (cleanName.toLowerCase() === "us dollar") {
+        const n = parseNumberLoose(row.price);
+        if (n != null) usdToman = n;
+        break;
+      }
     }
+
+    for (const row of arr) {
+      if (!row?.name) continue;
+
+      const { unit, cleanName } = extractUnitFromName(String(row.name));
+      const nameLower = cleanName.toLowerCase();
+      const priceNum = parseNumberLoose(row.price);
+      if (priceNum == null) continue;
+
+      const mapped = NAME_TO_CODE[nameLower];
+      const code = mapped?.code ?? normalizeKeyFromTitle(cleanName);
+
+      let kind: Rate["kind"] = "currency";
+      if (mapped?.kind) kind = mapped.kind;
+      else if (typeof row.price === "number") kind = "crypto";
+      else {
+        const n = nameLower;
+        kind =
+          n.includes("gold") ||
+          n.includes("azadi") ||
+          n.includes("ounce") ||
+          n.includes("mithqal") ||
+          n.includes("emami") ||
+          n.includes("gerami")
+            ? "gold"
+            : "currency";
+      }
+
+      let tomanPrice = priceNum;
+      let usdPrice: number | undefined = undefined;
+      let change24h: number | undefined = undefined;
+
+      // Crypto rows from the upstream JSON often have numeric price (USD)
+      if (typeof row.price === "number") {
+        usdPrice = priceNum;
+        const ch = row.percent_change_24h ?? row.change24h ?? row.change_24h ?? null;
+        const chNum = typeof ch === "number" ? ch : parseNumberLoose(ch);
+        if (chNum != null) change24h = chNum;
+
+        // If we have USD/Toman rate, compute local price.
+        if (usdToman) tomanPrice = usdPrice * usdToman;
+      }
+
+      const rate: Rate = {
+        price: tomanPrice,
+        unit,
+        kind,
+        title: mapped?.title ?? cleanName,
+        fa: mapped?.fa ?? cleanName,
+        emoji: mapped?.emoji ?? "",
+      };
+
+      if (usdPrice != null) rate.usdPrice = usdPrice;
+      if (change24h != null) rate.change24h = change24h;
+
+      rates[code] = rate;
+    }
+
+    const stored: Stored = { fetchedAtMs, source: PRICES_JSON_URL, rates };
+    return { stored, rawHash };
   }
 
-  for (const row of arr) {
-    if (!row?.name) continue;
+  const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
-    const { unit, cleanName } = extractUnitFromName(String(row.name));
-    const nameLower = cleanName.toLowerCase();
-    const priceNum = parseNumberLoose(row.price);
-    if (priceNum == null) continue;
+  if (isRecord(parsed) && isRecord(parsed.rates)) {
+    const p = parsed as Record<string, unknown>;
+    const ratesIn = p.rates as Record<string, unknown>;
 
-    const mapped = NAME_TO_CODE[nameLower];
-    const code = mapped?.code ?? normalizeKeyFromTitle(cleanName);
+    const fetchedAtMsRaw = p.fetchedAtMs;
+    const fetchedAtMs = typeof fetchedAtMsRaw === "number" && Number.isFinite(fetchedAtMsRaw) && fetchedAtMsRaw > 0 ? fetchedAtMsRaw : Date.now();
+    const source = typeof p.source === "string" && p.source ? (p.source as string) : PRICES_JSON_URL;
+    const timestamp = typeof p.timestamp === "string" ? (p.timestamp as string) : undefined;
 
-    let kind: Rate["kind"] = "currency";
-    if (mapped?.kind) kind = mapped.kind;
-    else if (typeof row.price === "number") kind = "crypto";
-    else {
-      const n = nameLower;
-      kind = n.includes("gold") || n.includes("azadi") || n.includes("emami") || n.includes("gerami") ? "gold" : "currency";
+    const rates: Record<string, Rate> = {};
+    for (const [code, r0] of Object.entries(ratesIn)) {
+      if (!isRecord(r0)) continue;
+
+      const kind = r0.kind;
+      if (kind !== "currency" && kind !== "gold" && kind !== "crypto") continue;
+
+      const priceNum = parseNumberLoose(r0.price);
+      if (priceNum == null) continue;
+
+      const unitNum = parseNumberLoose(r0.unit);
+      const unit = unitNum != null && Number.isFinite(unitNum) && unitNum >= 1 ? Math.trunc(unitNum) : 1;
+
+      const title = typeof r0.title === "string" ? (r0.title as string) : "";
+      const fa = typeof r0.fa === "string" ? (r0.fa as string) : "";
+      const emoji = typeof r0.emoji === "string" ? (r0.emoji as string) : "";
+
+      const rate: Rate = { price: priceNum, unit, kind, title, fa, emoji };
+
+      const usdPrice = parseNumberLoose(r0.usdPrice);
+      if (usdPrice != null) rate.usdPrice = usdPrice;
+
+      const change24h = parseNumberLoose(r0.change24h);
+      if (change24h != null) rate.change24h = change24h;
+
+      const aliases = r0.aliases;
+      if (Array.isArray(aliases)) {
+        const cleaned = aliases.filter((x) => typeof x === "string" && x.trim()).map((x) => (x as string).trim());
+        if (cleaned.length) rate.aliases = cleaned;
+      }
+
+      const inputMode = r0.inputMode;
+      if (inputMode === "native" || inputMode === "pack") rate.inputMode = inputMode;
+
+      rates[code] = rate;
     }
 
-    let tomanPrice = priceNum;
-    let usdPrice: number | undefined = undefined;
-    let change24h: number | undefined = undefined;
-
-    // Crypto rows from the upstream JSON often have numeric price (USD)
-    if (typeof row.price === "number") {
-      usdPrice = priceNum;
-      const ch =
-        row.percent_change_24h ??
-        row.percentChange24h ??
-        row.change_24h ??
-        row.change24h ??
-        row.pct_change_24h ??
-        row.pctChange24h;
-      const chNum = parseNumberLoose(ch);
-      if (chNum != null) change24h = chNum;
-
-      if (usdToman != null) tomanPrice = priceNum * usdToman;
-      kind = "crypto";
-    } else if (nameLower === "gold ounce" || nameLower === "pax gold" || nameLower === "tether gold") {
-      // Some gold tokens could be numeric-in-string but still USD
-      usdPrice = priceNum;
-      const ch = row.percent_change_24h ?? row.percentChange24h ?? row.change_24h ?? row.change24h;
-      const chNum = parseNumberLoose(ch);
-      if (chNum != null) change24h = chNum;
-
-      if (usdToman != null) tomanPrice = priceNum * usdToman;
-      kind = "crypto";
-    }
-
-    // If we have USD→Toman rate, also compute USD-equivalent for fiat currencies
-    if (kind === "currency" && usdToman != null) {
-      if (code === "usd") usdPrice = 1;
-      else usdPrice = tomanPrice / usdToman; // USD value for the reported unit
-    }
-
-    const meta = mapped
-      ? { emoji: mapped.emoji, fa: mapped.fa }
-      : META[code] ?? { emoji: kind === "crypto" ? "💎" : "💱", fa: cleanName };
-
-    rates[code] = {
-      price: tomanPrice,
-      unit,
-      kind,
-      title: cleanName,
-      emoji: meta.emoji,
-      fa: meta.fa,
-      usdPrice,
-      change24h,
-    };
+    const stored: Stored = { fetchedAtMs, source, rates };
+    if (timestamp) stored.timestamp = timestamp;
+    return { stored, rawHash };
   }
 
-  const stored: Stored = { fetchedAtMs, source: PRICES_JSON_URL, rates };
-  return { stored, rawHash };
+  throw new Error("unsupported_prices_payload");
 }
 
 async function refreshRates(env: Env) {
