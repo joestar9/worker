@@ -15,7 +15,8 @@ export interface Env {
 // -----------------------------
 
 const BOT_USERNAME = "worker093578bot";
-const PRICES_JSON_URL = "https://raw.githubusercontent.com/joestar9/price-scraper/refs/heads/main/rates_v2_latest";
+const PRICES_JSON_URL = "https://raw.githubusercontent.com/joestar9/price-scraper/main/rates_v2_latest";
+
 
 const TG_JSON_HEADERS = { "content-type": "application/json" } as const;
 const TG_PARSE_MODE = "HTML" as const;
