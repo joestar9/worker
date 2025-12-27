@@ -449,7 +449,22 @@ async function handleTwitterSyndicationDownload(env: Env, chatId: number, target
     body: JSON.stringify({ chat_id: chatId, action: "upload_video" }),
   }).catch(() => {});
 
-  const tweetId = extractTweetId(targetUrl);
+  let resolvedUrl = targetUrl;
+  let tweetId = extractTweetId(resolvedUrl);
+
+  // Handle shorteners/alternate frontends (t.co, fxTwitter, etc.) by following redirects once.
+  if (!tweetId) {
+    try {
+      const r = await fetch(resolvedUrl, {
+        redirect: "follow",
+        headers: { "User-Agent": "Mozilla/5.0" },
+        cf: { cacheTtl: 60, cacheEverything: true },
+      });
+      if (r?.url) resolvedUrl = r.url;
+    } catch {}
+    tweetId = extractTweetId(resolvedUrl);
+  }
+
   if (!tweetId) {
     await tgSend(env, chatId, "❌ لینک توییتر معتبر نیست.", replyTo);
     return true;
@@ -1614,7 +1629,19 @@ export default {
         try {
           host = new URL(downloadUrl).hostname.toLowerCase();
         } catch {}
-        if (host === "twitter.com" || host.endsWith(".twitter.com") || host === "x.com" || host.endsWith(".x.com")) {
+
+        const twitterLike =
+          host === "twitter.com" ||
+          host.endsWith(".twitter.com") ||
+          host === "mobile.twitter.com" ||
+          host === "x.com" ||
+          host.endsWith(".x.com") ||
+          host === "t.co" ||
+          host === "fxtwitter.com" ||
+          host === "vxtwitter.com" ||
+          host === "fixupx.com";
+
+        if (twitterLike) {
           await handleTwitterSyndicationDownload(env, chatId, downloadUrl, replyTo);
         } else {
           await handleCobaltPublicDownload(env, chatId, downloadUrl, replyTo);
