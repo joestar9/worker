@@ -604,84 +604,9 @@ function parseTwitterSyndicationMedia(d: unknown): TwitterMediaItem[] {
   return out;
 }
 
-function parseFixTweetApiMedia(d: unknown): TwitterMediaItem[] {
-  const out: TwitterMediaItem[] = [];
-  if (!d || typeof d !== "object") return out;
-  const anyD: any = d as any;
-  const tweet = anyD.tweet ?? anyD.status ?? anyD.data ?? anyD;
-  const media = tweet?.media ?? tweet?.mediaDetails ?? tweet?.media_details;
 
-  const photos: any[] | undefined = media?.photos;
-  if (Array.isArray(photos)) {
-    for (const p of photos) {
-      const url = p?.url;
-      if (typeof url === "string") out.push({ type: "photo", url: url.includes("?") ? url : `${url}?name=orig` });
-    }
-  }
 
-  const videos: any[] | undefined = media?.videos;
-  if (Array.isArray(videos)) {
-    for (const v of videos) {
-      const url = v?.url;
-      if (typeof url === "string") out.push({ type: "video", url });
-    }
-  }
 
-  // Some APIs provide a single external video URL.
-  const external = media?.external;
-  if (external && typeof external?.url === "string") out.push({ type: "video", url: external.url });
-
-  return out;
-}
-
-function parseTwitterMediaAny(d: unknown): TwitterMediaItem[] {
-  // Prefer FixTweet-style schema if present, otherwise fallback to syndication parser.
-  const fix = parseFixTweetApiMedia(d);
-  if (fix.length) return fix;
-  return parseTwitterSyndicationMedia(d);
-}
-
-function parseFixTweetApiMedia(d: unknown): TwitterMediaItem[] {
-  const out: TwitterMediaItem[] = [];
-  if (!d || typeof d !== "object") return out;
-  const anyD: any = d as any;
-
-  // FixTweet API wraps in { code, message, tweet: { media: { photos, videos, external }}}
-  const tweet = anyD.tweet ?? anyD.status ?? anyD.data ?? anyD;
-  const media = tweet?.media ?? tweet?.extended_media ?? tweet?.extendedMedia;
-
-  const photos = media?.photos;
-  if (Array.isArray(photos)) {
-    for (const p of photos) {
-      const url = p?.url;
-      if (typeof url === "string") out.push({ type: "photo", url: url.includes("?") ? url : `${url}?name=orig` });
-    }
-  }
-
-  const videos = media?.videos;
-  if (Array.isArray(videos)) {
-    for (const v of videos) {
-      const url = v?.url;
-      if (typeof url === "string") out.push({ type: "video", url });
-    }
-  }
-
-  // external media (usually video) - keep as video if present
-  const external = media?.external;
-  if (external && typeof external === "object") {
-    const url = external.url;
-    if (typeof url === "string") out.push({ type: "video", url });
-  }
-
-  return out;
-}
-
-function parseTwitterMediaAny(d: unknown): TwitterMediaItem[] {
-  // Try FixTweet API shape first, then syndication.
-  const fx = parseFixTweetApiMedia(d);
-  if (fx.length) return fx;
-  return parseTwitterSyndicationMedia(d);
-}
 
 async function tgSendMediaGroup(
   env: Env,
