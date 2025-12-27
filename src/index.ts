@@ -395,29 +395,42 @@ function pickCobaltOnlyUrl(text: string): string | null {
 }
 
 async function fetchWithRetry(
-  input: RequestInfo | URL,
+  url: string,
   init: RequestInit,
-  tries = 3,
-  baseDelayMs = 250,
+  attempts: number,
+  baseDelayMs: number,
 ): Promise<Response> {
-  let lastErr: unknown;
-  for (let i = 0; i < tries; i++) {
+  let lastErr: unknown = null;
+
+  for (let i = 0; i < attempts; i++) {
     try {
-      const r = await fetch(input, init);
-      // Retry on transient upstream errors (and rate limiting)
-      if (r.status >= 500 || r.status === 429) {
-        lastErr = new Error(`HTTP ${r.status}`);
-      } else {
-        return r;
+      const res = await fetch(url, init);
+
+      // Retry on temporary errors / rate limits
+      if (res.status === 429 || (res.status >= 500 && res.status <= 599)) {
+        if (i < attempts - 1) {
+          const ra = res.headers.get("retry-after");
+          const raMs = ra ? Math.min(10_000, Number(ra) * 1000) : 0;
+          const jitter = Math.floor(Math.random() * 120);
+          await sleepMs(Math.max(raMs, baseDelayMs * 2 ** i + jitter));
+          continue;
+        }
       }
-    } catch (e: unknown) {
+
+      return res;
+    } catch (e) {
       lastErr = e;
+      if (i < attempts - 1) {
+        const jitter = Math.floor(Math.random() * 120);
+        await sleepMs(baseDelayMs * 2 ** i + jitter);
+        continue;
+      }
+      throw e;
     }
-    // simple backoff with jitter
-    const delay = baseDelayMs * (i + 1) + Math.floor(Math.random() * 120);
-    await new Promise((res) => setTimeout(res, delay));
   }
-  throw lastErr instanceof Error ? lastErr : new Error("fetch failed");
+
+  // should never reach
+  throw lastErr instanceof Error ? lastErr : new Error("fetchWithRetry failed");
 }
 
 async function fetchCobalt(baseUrl: string, targetUrl: string): Promise<unknown> {
@@ -481,34 +494,84 @@ function extractMetaContent(html: string, key: string): string | null {
 }
 
 function parseFixerHtmlMedia(html: string): TwitterMediaItem[] {
-  // Many embed-fixer pages expose direct MP4 via og:video or twitter:player:stream
-  const video =
-    extractMetaContent(html, 'og:video') ||
-    extractMetaContent(html, 'og:video:url') ||
-    extractMetaContent(html, 'twitter:player:stream') ||
-    extractMetaContent(html, 'twitter:player:stream:url');
+  // Many embed-fixer pages expose direct media via meta tags.
+  // Some use `og:video`, some `twitter:player:stream`, and some provide URLs without `.mp4` suffix.
+  const videoCandidates = [
+    extractMetaContent(html, "og:video"),
+    extractMetaContent(html, "og:video:url"),
+    extractMetaContent(html, "og:video:secure_url"),
+    extractMetaContent(html, "twitter:player:stream"),
+    extractMetaContent(html, "twitter:player:stream:url"),
+    extractMetaContent(html, "twitter:player:stream:content_type"),
+    extractMetaContent(html, "twitter:player"),
+  ].filter((v): v is string => typeof v === "string" && v.length > 0);
 
-  if (video && /\.(mp4)(\?|$)/i.test(video)) return [{ type: 'video', url: video }];
+  for (const v of videoCandidates) {
+    // Accept common direct-video patterns
+    const vv = v.trim();
+    if (
+      /video\.twimg\.com/i.test(vv) ||
+      /\bmp4\b/i.test(vv) ||
+      /format=mp4/i.test(vv) ||
+      /mime=video%2Fmp4/i.test(vv)
+    ) {
+      return [{ type: "video", url: vv }];
+    }
+  }
 
-  const img = extractMetaContent(html, 'og:image') || extractMetaContent(html, 'twitter:image');
-  if (img) return [{ type: 'photo', url: img.includes('?') ? img : `${img}?name=orig` }];
+  const img =
+    extractMetaContent(html, "og:image") ||
+    extractMetaContent(html, "og:image:url") ||
+    extractMetaContent(html, "twitter:image") ||
+    extractMetaContent(html, "twitter:image:src");
+
+  if (img) {
+    const u = img.trim();
+    return [{ type: "photo", url: u.includes("?") ? u : `${u}?name=orig` }];
+  }
 
   return [];
 }
 
-async function fetchFixerHtmlMedia(tweetId: string): Promise<TwitterMediaItem[]> {
-  // These domains are commonly used for embedding/downloading tweets.
+async function fetchFixerHtmlMedia(tweetId: string, hintUrl?: string): Promise<TwitterMediaItem[]> {
+  // If user already sent an embed-fixer URL, try it first (it may include extra routing parameters).
+  const tried = new Set<string>();
+  const urls: string[] = [];
+
+  if (hintUrl) {
+    try {
+      const u = new URL(hintUrl);
+      const h = u.hostname.toLowerCase();
+      if (h === "fixupx.com" || h === "vxtwitter.com" || h === "fxtwitter.com" || h === "xtwitter.com") {
+        urls.push(hintUrl);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
   const bases = [
-    'https://fixupx.com/i/status/',
-    'https://vxtwitter.com/i/status/',
-    'https://fxtwitter.com/i/status/',
-    'https://xtwitter.com/i/status/',
+    "https://fixupx.com",
+    "https://vxtwitter.com",
+    "https://fxtwitter.com",
+    "https://xtwitter.com",
   ];
 
-  for (const b of bases) {
-    const url = `${b}${encodeURIComponent(tweetId)}`;
+  for (const base of bases) {
+    urls.push(`${base}/i/status/${encodeURIComponent(tweetId)}`);
+    urls.push(`${base}/status/${encodeURIComponent(tweetId)}`);
+  }
+
+  for (const url of urls) {
+    if (tried.has(url)) continue;
+    tried.add(url);
     try {
-      const res = await fetchWithRetry(url, { method: 'GET', redirect: 'follow', headers: TW_HTML_HEADERS }, 2, 250);
+      const res = await fetchWithRetry(
+        url,
+        { method: "GET", redirect: "follow", headers: TW_HTML_HEADERS },
+        3,
+        250,
+      );
       if (!res.ok) continue;
       const html = await res.text();
       const items = parseFixerHtmlMedia(html);
@@ -517,6 +580,7 @@ async function fetchFixerHtmlMedia(tweetId: string): Promise<TwitterMediaItem[]>
       // ignore and try next
     }
   }
+
   return [];
 }
 
@@ -584,6 +648,21 @@ function parseTwitterSyndicationMedia(d: unknown): TwitterMediaItem[] {
         const variants = m?.video_info?.variants ?? m?.videoInfo?.variants ?? m?.variants ?? anyD?.video?.variants;
         const best = pickBestMp4Variant(variants);
         if (best) out.push({ type: "video", url: best });
+      }
+    }
+  }
+
+
+  // fallback: some payloads include `photos` array with `{ url }`
+  if (out.length === 0) {
+    const photos: any[] | undefined = Array.isArray(anyD.photos) ? anyD.photos : undefined;
+    if (photos && photos.length) {
+      for (const p of photos) {
+        const u = p?.url ?? p?.media_url_https ?? p?.media_url ?? p?.mediaUrlHttps ?? p?.mediaUrl;
+        if (typeof u === "string" && u) {
+          out.push({ type: "photo", url: u.includes("?") ? u : `${u}?name=orig` });
+          break;
+        }
       }
     }
   }
@@ -730,7 +809,7 @@ async function handleTwitterSyndicationDownload(env: Env, chatId: number, target
   // 6) Fallback: scrape embed-fixer HTML meta tags (og:video / twitter:player:stream), with retries
   let fixerItems: TwitterMediaItem[] = [];
   for (let round = 0; round < 3 && fixerItems.length === 0; round++) {
-    fixerItems = await fetchFixerHtmlMedia(tweetId);
+    fixerItems = await fetchFixerHtmlMedia(tweetId, resolvedUrl);
     if (fixerItems.length === 0 && round < 2) await sleepMs(250 * 2 ** round);
   }
 
