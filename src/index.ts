@@ -1513,7 +1513,7 @@ export default {
 
       const stored = await getStoredOrRefresh(env, ctx);
 
-      if (cmd === "/all") {
+      if (cmd === "ارز") {
         const out = buildAll(stored);
         const chunks = chunkText(out, 3800);
         for (const c of chunks) await tgSend(env, chatId, c, replyTo);
