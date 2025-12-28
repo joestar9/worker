@@ -1060,12 +1060,6 @@ function buildAll(stored: Stored) {
     lines.push("");
   }
 
-  if (cryptoItems.length > 0) {
-    lines.push("🚀 <b>بازار ارز دیجیتال</b>");
-    lines.push("➖➖➖➖➖➖");
-    lines.push(...cryptoItems);
-  }
-
   const date = new Date(stored.fetchedAtMs + 3.5 * 3600000);
   const timeStr = date.toISOString().substr(11, 5);
   lines.push("\n🕐 <b>بروزرسانی:</b> " + timeStr);
@@ -1572,5 +1566,3 @@ function computeDefaultListsFromRates(rates: Record<string, Rate>): { fiat: stri
 
   return { fiat: [...goldCodes, ...currencyCodes], crypto: cryptoCodes };
 }
-
-
