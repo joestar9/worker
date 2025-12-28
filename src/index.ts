@@ -325,8 +325,7 @@ function pickCobaltUrl(text: string): string | null {
   // Prefer full URLs, but also accept bare domains like x.com/... when users omit the scheme.
   const m =
     text.match(/https?:\/\/[^\s<>()]+/i) ??
-    text.match(/\b(?:x\.com|twitter\.com|t\.co|fixupx\.com|vxtwitter\.com|fxtwitter\.com|xtwitter\.com|instagram\.com)\/[^
-\s<>()]+/i);
+    text.match(/\b(?:x\.com|twitter\.com|t\.co|fixupx\.com|vxtwitter\.com|fxtwitter\.com|xtwitter\.com|instagram\.com)\/[^\s<>()]+/i);
   if (!m) return null;
 
   // trim common trailing punctuation when users paste links in text
