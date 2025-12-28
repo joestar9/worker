@@ -4,6 +4,16 @@ export interface Env {
   TG_SECRET: string;
   ADMIN_KEY: string;
 }
+
+/**
+ * Telegram Bot + currency/crypto/gold prices + Instagram/Twitter/X downloader
+ * Runtime: Cloudflare Workers
+ */
+
+// -----------------------------
+// Constants
+// -----------------------------
+
 const BOT_USERNAME = "worker093578bot";
 const PRICES_JSON_URL = "https://raw.githubusercontent.com/joestar9/price-scraper/main/rates_v2_latest";
 
@@ -33,15 +43,20 @@ const COBALT_HEADERS = {
   Referer: "https://cobalt.tools/",
 } as const;
 
-const PRICES_CACHE_TTL_SECONDS = 15 * 60;
+const PRICES_CACHE_TTL_SECONDS = 15 * 60; // caches.default TTL per PoP
 const PRICES_CACHE_KEY = new Request(PRICES_JSON_URL, { method: "GET" });
 
-const RATES_CACHE_TTL_MS = 60_000;
-const STALE_REFRESH_MS = 30 * 60_000;
+const RATES_CACHE_TTL_MS = 60_000; // memory cache per isolate
+const STALE_REFRESH_MS = 30 * 60_000; // you update prices every ~25 minutes
 
+// Parsing caches
 const PARSE_TTL_MS = 15_000;
 const CONTEXT_TTL_MS = 60_000;
 const PARSE_CACHE_MAX = 5_000;
+
+// -----------------------------
+// Telegram minimal types (only what we use)
+// -----------------------------
 
 type TgChatType = "private" | "group" | "supergroup" | "channel";
 
@@ -77,6 +92,10 @@ type TgUpdate = {
   callback_query?: TgCallbackQuery;
 };
 
+// -----------------------------
+// Rates data types
+// -----------------------------
+
 type Rate = {
   price: number;
   unit: number;
@@ -86,7 +105,7 @@ type Rate = {
   fa: string;
   usdPrice?: number;
   change24h?: number;
-
+  // Optional improvements from upstream JSON (safe to ignore if absent)
   aliases?: string[];
   inputMode?: "pack" | "native";
 };
@@ -96,10 +115,14 @@ type Stored = {
   source: string;
   timestamp?: string;
   rates: Record<string, Rate>;
-
+  // Precomputed in GitHub Actions to reduce Worker CPU
   aliasIndex: Record<string, string>;
   lists: { fiat: string[]; crypto: string[] };
 };
+
+// -----------------------------
+// Static metadata (flags, names)
+// -----------------------------
 
 const META: Record<string, { emoji: string; fa: string }> = {
   usd: { emoji: "🇺🇸", fa: "دلار آمریکا" },
@@ -160,6 +183,10 @@ const CRYPTO_META: Record<string, { emoji: string; fa: string }> = {
   bnb: { emoji: "🟡", fa: "بی‌ان‌بی" },
 };
 
+// -----------------------------
+// Fast string normalization utilities
+// -----------------------------
+
 const DIGIT_MAP: Record<string, string> = {
   "۰": "0",
   "۱": "1",
@@ -184,7 +211,8 @@ const DIGIT_MAP: Record<string, string> = {
 };
 
 function normalizeDigits(input: string) {
-
+  // Fast path: return the same string if no Persian/Arabic digit is present.
+  // Avoid O(n^2) string concatenation; only allocate if a replacement is needed.
   let out: string[] | null = null;
   for (let i = 0; i < input.length; i++) {
     const ch = input[i];
@@ -225,11 +253,14 @@ function formatUSD(n: number) {
   return n.toLocaleString("en-US", { maximumFractionDigits: 2 });
 }
 
+
 type AliasIndexCache = { exact: Map<string, string>; compact: Map<string, string>; scan: string[] };
 type RuntimeRatesCache = { stored: Stored; alias: AliasIndexCache; loadedAtMs: number };
 
 let RUNTIME_RATES_CACHE: RuntimeRatesCache | null = null;
 
+// Prevent obviously-generic aliases from matching everything.
+// (Keep this list tiny; you can still add real aliases like "طلا" or "سکه" in your JSON if you want.)
 const GENERIC_ALIAS = new Set(["قیمت", "price"]);
 
 function normalizeAlias(raw: string) {
@@ -263,14 +294,14 @@ function buildAliasIndexCache(stored: Stored): AliasIndexCache {
   };
 
   const idx = stored.aliasIndex || {};
-
+  // Prefer precomputed aliasIndex from JSON
   if (Object.keys(idx).length) {
-
+    // aliasIndex is expected to be pre-normalized, but we still run normalizeAlias for safety.
     for (const [k, code] of Object.entries(idx)) {
       if (typeof k === "string" && typeof code === "string" && stored.rates[code]) add(k, code);
     }
   } else {
-
+    // Backward compatibility: build a minimal alias index from rates (one-time per load).
     for (const code in stored.rates) {
       const r = stored.rates[code];
       add(code, code);
@@ -280,16 +311,21 @@ function buildAliasIndexCache(stored: Stored): AliasIndexCache {
     }
   }
 
+  // Always allow matching by the code itself (usd, btc, ...), even if missing in aliasIndex.
   for (const code in stored.rates) add(code, code);
 
   scan.sort((a, b) => b.length - a.length);
   return { exact, compact, scan };
 }
+// -----------------------------
+// Downloader helpers
+// -----------------------------
 
 function pickCobaltUrl(text: string): string | null {
   const m = text.match(/https?:\/\/[^\s<>()]+/i);
   if (!m) return null;
 
+  // trim common trailing punctuation when users paste links in text
   const raw = m[0].replace(/[)\]}>,.!?؟؛:]+$/g, "");
 
   try {
@@ -317,8 +353,10 @@ function pickCobaltUrl(text: string): string | null {
 async function fetchCobalt(baseUrl: string, targetUrl: string): Promise<unknown> {
   const body = JSON.stringify({ url: targetUrl, vCodec: "h264" });
 
+  // Some instances expose /api/json; some are already that endpoint.
   let apiRes = await fetch(baseUrl, { method: "POST", headers: COBALT_HEADERS, body });
 
+  // fallback for instances that require /api/json
   if (!apiRes.ok && apiRes.status === 404 && !baseUrl.includes("json")) {
     const retryUrl = baseUrl.endsWith("/") ? `${baseUrl}api/json` : `${baseUrl}/api/json`;
     apiRes = await fetch(retryUrl, { method: "POST", headers: COBALT_HEADERS, body });
@@ -329,7 +367,7 @@ async function fetchCobalt(baseUrl: string, targetUrl: string): Promise<unknown>
 }
 
 async function handleCobaltPublicDownload(env: Env, chatId: number, targetUrl: string, replyTo?: number) {
-
+  // show user we're working
   await fetch(`${tgBase(env)}/sendChatAction`, {
     method: "POST",
     headers: TG_JSON_HEADERS,
@@ -376,6 +414,10 @@ async function processCobaltResponse(env: Env, chatId: number, data: unknown, re
   throw new Error("Unknown response");
 }
 
+// -----------------------------
+// Rate fetching and storage
+// -----------------------------
+
 function parseNumberLoose(v: unknown): number | null {
   if (typeof v === "number") return Number.isFinite(v) ? v : null;
   if (typeof v !== "string") return null;
@@ -385,12 +427,16 @@ function parseNumberLoose(v: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+type FetchRawResult =
+  | { kind: "not_modified" }
+  | { kind: "ok"; rawText: string; etag?: string | null };
+
 async function fetchPricesRaw(): Promise<string> {
   const headers: Record<string, string> = { "User-Agent": "Mozilla/5.0" };
 
   const res = await fetch(PRICES_JSON_URL, {
     headers,
-
+    // enable Cloudflare fetch caching as an extra layer
     cf: { cacheEverything: true, cacheTtl: PRICES_CACHE_TTL_SECONDS },
   } as RequestInit & { cf?: unknown });
 
@@ -410,9 +456,11 @@ function validateStored(stored: Stored): string | null {
   if (stored.lists.fiat.length === 0) return "lists.fiat empty";
   if (stored.lists.crypto.length === 0) return "lists.crypto empty";
 
+  // quick integrity checks (best-effort)
   for (const c of stored.lists.fiat) if (typeof c !== "string" || !stored.rates[c]) return "lists.fiat contains unknown code";
   for (const c of stored.lists.crypto) if (typeof c !== "string" || !stored.rates[c]) return "lists.crypto contains unknown code";
 
+  // aliasIndex is optional for backward compatibility; Worker will build a fallback if missing.
   if (!stored.aliasIndex || typeof stored.aliasIndex !== "object") stored.aliasIndex = {};
 
   return null;
@@ -499,6 +547,7 @@ function buildStoredFromRaw(rawText: string): Stored {
     rates[code] = rate;
   }
 
+  // If lists were not provided (or incomplete), compute them from rates (backward compatible).
   if (!lists.fiat.length || !lists.crypto.length) {
     const fallback = computeDefaultListsFromRates(rates);
     if (!lists.fiat.length) lists.fiat = fallback.fiat;
@@ -510,6 +559,8 @@ function buildStoredFromRaw(rawText: string): Stored {
 
   return stored;
 }
+
+
 
 async function refreshRates(
   ctx?: ExecutionContext
@@ -523,15 +574,17 @@ async function refreshRates(
     const validationError = validateStored(stored);
     if (validationError) throw new Error(`validation_failed:${validationError}`);
 
+    // Update caches.default for all subsequent requests (per PoP).
     const cacheRes = new Response(rawText, {
       headers: {
         "Content-Type": "application/json; charset=utf-8",
         "Cache-Control": `public, max-age=${PRICES_CACHE_TTL_SECONDS}`,
       },
     });
-
+    // Best-effort; if it fails we still keep in-memory cache.
     await caches.default.put(PRICES_CACHE_KEY, cacheRes.clone()).catch(() => {});
 
+    // Update in-isolate cache immediately.
     RUNTIME_RATES_CACHE = { stored, alias: buildAliasIndexCache(stored), loadedAtMs: Date.now() };
 
     const changed = stored.fetchedAtMs !== prevFetchedAtMs;
@@ -540,21 +593,24 @@ async function refreshRates(
     return { ok: true, changed, count, fetchedAtMs: stored.fetchedAtMs };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-
+    // keep last good cache if refresh fails
     ctx?.waitUntil?.(Promise.resolve());
     return { ok: false, error: msg };
   }
 }
 
+
 async function getStoredOrRefresh(env: Env, ctx: ExecutionContext): Promise<Stored> {
   const now = Date.now();
 
+  // In-isolate memory cache: reduces JSON.parse and cache reads.
   const cached = RUNTIME_RATES_CACHE;
   if (cached && now - cached.loadedAtMs <= RATES_CACHE_TTL_MS) {
     if (now - cached.stored.fetchedAtMs > STALE_REFRESH_MS) ctx.waitUntil(refreshRates(ctx).catch(() => {}));
     return cached.stored;
   }
 
+  // caches.default (per PoP)
   const hit = await caches.default.match(PRICES_CACHE_KEY);
   if (hit) {
     const rawText = await hit.text();
@@ -567,17 +623,21 @@ async function getStoredOrRefresh(env: Env, ctx: ExecutionContext): Promise<Stor
     }
   }
 
+  // Cold start: fetch + populate cache
   const res = await refreshRates(ctx);
   if (res.ok) {
     const c = RUNTIME_RATES_CACHE;
     if (c) return c.stored;
   }
 
+  // Last resort: try direct fetch without caching
   const rawText = await fetchPricesRaw();
   const stored = buildStoredFromRaw(rawText);
   RUNTIME_RATES_CACHE = { stored, alias: buildAliasIndexCache(stored), loadedAtMs: now };
   return stored;
 }
+
+
 
 function parsePersianNumber(tokens: string[]): number | null {
   const ones: Record<string, number> = {
@@ -718,15 +778,17 @@ function findCode(textNorm: string, rates: Record<string, Rate>, alias?: AliasIn
   const cleaned = stripPunct(textNorm).replace(/\s+/g, " ").trim();
   const compact = cleaned.replace(/\s+/g, "");
 
+  // 1) exact/compact full-string matches (fast path)
   if (alias) {
     const direct = alias.exact.get(cleaned) ?? alias.compact.get(compact);
     if (direct && rates[direct]) return direct;
   }
 
+  // 2) bounded scan inside the sentence (works for inputs like "100 دلار" and "دلار100")
   if (alias) {
     for (const needle of alias.scan) {
       if (needle.length < 2) continue;
-
+      // Check both spaced and compact haystacks; this supports inputs like "100دلار" / "دلار100".
       if (hasBounded(cleaned, needle) || hasBounded(compact, needle)) {
         const code = alias.exact.get(needle) ?? alias.compact.get(needle);
         if (code && rates[code]) return code;
@@ -734,6 +796,7 @@ function findCode(textNorm: string, rates: Record<string, Rate>, alias?: AliasIn
     }
   }
 
+  // 3) plain code match anywhere (usd, btc, ...)
   const m = cleaned.match(/\b([a-z]{3,10})\b/i);
   if (m) {
     const candidate = m[1].toLowerCase();
@@ -742,6 +805,7 @@ function findCode(textNorm: string, rates: Record<string, Rate>, alias?: AliasIn
 
   return null;
 }
+
 
 function extractAmountOrNull(textNorm: string): number | null {
   const cleaned = stripPunct(textNorm).replace(/\s+/g, " ").trim();
@@ -764,17 +828,17 @@ const userContext = new Map<number, { ts: number; code: string }>();
 
 const AMOUNT_ONLY_WORDS = new Set([
   "و",
-
+  // ones
   "یک","یه","دو","سه","چهار","پنج","شش","شیش","هفت","هشت","نه",
-
+  // teens
   "ده","یازده","دوازده","سیزده","چهارده","پانزده","شانزده","هفده","هجده","نوزده",
-
+  // tens
   "بیست","سی","چهل","پنجاه","شصت","هفتاد","هشتاد","نود",
-
+  // hundreds
   "صد","یکصد","دویست","سیصد","چهارصد","پانصد","ششصد","شیشصد","هفتصد","هشتصد","نهصد",
-
+  // scales
   "هزار","میلیون","ملیون","میلیارد","بیلیون","تریلیون",
-
+  // latin scales
   "k","m","b",
 ]);
 
@@ -787,17 +851,21 @@ function isAmountOnlyQuery(textNorm: string): boolean {
     if (AMOUNT_ONLY_WORDS.has(tok)) continue;
 
     const t = tok.replace(/,/g, "");
-
+    // pure digits (or decimal)
     if (/^\d+(?:\.\d+)?$/.test(t)) continue;
 
+    // digits + scale suffix without space (e.g. 100k, 2.5m)
     if (/^\d+(?:\.\d+)?(?:k|m|b)$/.test(t)) continue;
 
+    // digits + Persian scale without space (e.g. 100هزار)
     if (/^\d+(?:\.\d+)?(?:هزار|میلیون|ملیون|میلیارد|بیلیون|تریلیون)$/.test(t)) continue;
 
+    // Any other token means user likely typed a currency/keyword; do NOT reuse context.
     return false;
   }
   return true;
 }
+
 
 function pruneParseCache(now: number) {
   if (parseCache.size <= PARSE_CACHE_MAX) return;
@@ -846,12 +914,16 @@ function normalizeCommand(textNorm: string) {
   return first.split("@")[0];
 }
 
+// -----------------------------
+// Telegram API helpers
+// -----------------------------
+
 function tgBase(env: Env) {
   return `https://api.telegram.org/bot${env.TG_TOKEN}`;
 }
 
 async function tgCall(env: Env, method: string, body: unknown) {
-
+  // Intentionally no retries here: Telegram send* methods are not idempotent.
   await fetch(`${tgBase(env)}/${method}`, {
     method: "POST",
     headers: TG_JSON_HEADERS,
@@ -915,6 +987,103 @@ async function tgSendPhoto(env: Env, chatId: number, photoUrl: string | undefine
   }
   await tgCall(env, "sendPhoto", body);
 }
+
+// -----------------------------
+// UI formatting and keyboards
+// -----------------------------
+
+function chunkText(s: string, maxLen = 3500) {
+  const out: string[] = [];
+  for (let i = 0; i < s.length; i += maxLen) out.push(s.slice(i, i + maxLen));
+  return out;
+}
+
+function buildAll(stored: Stored) {
+  const rates = stored.rates;
+
+  const goldItems: string[] = [];
+  const currencyItems: string[] = [];
+  const cryptoItems: string[] = [];
+
+  const usd = rates["usd"];
+  const usdPer1 = usd ? usd.price / (usd.unit || 1) : null;
+
+  // Fiat (gold + currency) in precomputed order
+  for (const c of stored.lists.fiat || []) {
+    const r = rates[c];
+    if (!r || r.kind === "crypto") continue;
+
+    const showUnit = r.kind === "currency" && (r.unit || 1) > 1;
+    const baseAmount = showUnit ? (r.unit || 1) : 1;
+    const baseToman = showUnit ? Math.round(r.price) : Math.round(r.price / (r.unit || 1));
+    const priceStr = formatToman(baseToman);
+
+    const meta = META[c] ?? { emoji: "💱", fa: r.title || c.toUpperCase() };
+    const usdEq = usdPer1 && c !== "usd" && r.kind === "currency" ? baseToman / usdPer1 : null;
+    const unitPrefix = showUnit ? `${baseAmount} ` : "";
+    const usdPart = usdEq != null ? ` (≈ $${formatUSD(usdEq)})` : "";
+    const line = `${meta.emoji} <b>${unitPrefix}${meta.fa}:</b> \u200E<code>${priceStr}</code> تومان${usdPart}`;
+
+    if (r.kind === "gold" || c.includes("coin") || c.includes("gold")) goldItems.push(line);
+    else currencyItems.push(line);
+  }
+
+  // Crypto in precomputed order
+  for (const c of stored.lists.crypto || []) {
+    const r = rates[c];
+    if (!r || r.kind !== "crypto") continue;
+
+    const per1 = Math.round(r.price / (r.unit || 1));
+    const priceStr = formatToman(per1);
+    const meta = CRYPTO_META[c] ?? { emoji: r.emoji || "💎", fa: r.fa || r.title || c.toUpperCase() };
+
+    const usdP = r.usdPrice != null ? formatUSD(r.usdPrice) : "?";
+    const changePart =
+      typeof r.change24h === "number" ? ` | ${r.change24h >= 0 ? "🟢" : "🔴"} ${Math.abs(r.change24h).toFixed(1)}%` : "";
+    const line = `💎 <b>${meta.fa}</b> (${c.toUpperCase()})\n└ ${priceStr} ت | ${usdP}$${changePart}`;
+    cryptoItems.push(line);
+  }
+
+  const lines: string[] = [];
+
+  if (goldItems.length > 0) {
+    lines.push("🟡 <b>نرخ طلا و سکه</b>");
+    lines.push("➖➖➖➖➖➖");
+    lines.push(...goldItems);
+    lines.push("");
+  }
+
+  if (currencyItems.length > 0) {
+    lines.push("💵 <b>نرخ ارزهای بازار</b>");
+    lines.push("➖➖➖➖➖➖");
+    lines.push(...currencyItems);
+    lines.push("");
+  }
+
+  if (cryptoItems.length > 0) {
+    lines.push("🚀 <b>بازار ارز دیجیتال</b>");
+    lines.push("➖➖➖➖➖➖");
+    lines.push(...cryptoItems);
+  }
+
+  const date = new Date(stored.fetchedAtMs + 3.5 * 3600000);
+  const timeStr = date.toISOString().substr(11, 5);
+  lines.push("\n🕐 <b>بروزرسانی:</b> " + timeStr);
+
+  return lines.join("\n");
+}
+
+
+const PRICE_PAGE_SIZE = 8;
+
+type PriceCategory = "fiat" | "crypto";
+type PriceListItem = {
+  code: string;
+  category: PriceCategory;
+  emoji: string;
+  name: string;
+  price: string;
+};
 
 function getUpdateTimeStr(stored: Stored) {
   const date = new Date(stored.fetchedAtMs + 3.5 * 3600000);
@@ -1054,6 +1223,7 @@ function buildPriceDetailText(stored: Stored, category: PriceCategory, code: str
 function replyCurrency(code: string, r: Rate, amount: number, stored: Stored, hasAmount: boolean) {
   const refUnit = Math.max(1, r.unit || 1);
 
+  // ---------- CRYPTO ----------
   if (r.kind === "crypto") {
     const qty = hasAmount ? amount : 1;
     const totalToman = (r.price / refUnit) * (qty * refUnit);
@@ -1061,6 +1231,7 @@ function replyCurrency(code: string, r: Rate, amount: number, stored: Stored, ha
     const per1Usd = typeof r.usdPrice === "number" ? r.usdPrice : null;
     const totalUsdDirect = per1Usd ? per1Usd * qty : null;
 
+    // Fallback USD conversion via USD/Toman if usdPrice isn't provided
     const usd = stored.rates["usd"];
     const usdPer1Toman = usd ? usd.price / (usd.unit || 1) : null;
     const totalUsd = totalUsdDirect ?? (usdPer1Toman ? totalToman / usdPer1Toman : null);
@@ -1079,9 +1250,17 @@ function replyCurrency(code: string, r: Rate, amount: number, stored: Stored, ha
     return lines.join("\n");
   }
 
+  // ---------- FIAT / CURRENCY ----------
+  // Default behavior (backward compatible):
+  // - If unit>1, treat the user's amount as "count of reference units" (pack mode).
+  //   Example: unit=100 and user enters 2 => 2 × (100 IQD).
+  //
+  // Optional (future) data-driven override:
+  // - If r.inputMode === "native", treat user's amount as base units directly.
   const inputMode = (r as unknown as { inputMode?: unknown }).inputMode;
   const qty = hasAmount ? amount : 1;
 
+  // r.price is the price for "refUnit" base units.
   const per1Toman = r.price / refUnit;
 
   const baseUnits =
@@ -1097,9 +1276,10 @@ function replyCurrency(code: string, r: Rate, amount: number, stored: Stored, ha
   const usdPer1Toman = usd ? usd.price / (usd.unit || 1) : null;
   const totalUsd = usdPer1Toman ? totalToman / usdPer1Toman : null;
 
-  const LRI = "\u2066";
-  const RLI = "\u2067";
-  const PDI = "\u2069";
+  // Bidi-safe pieces (numbers + emoji can get reordered in RTL)
+  const LRI = "\u2066"; // left-to-right isolate
+  const RLI = "\u2067"; // right-to-left isolate
+  const PDI = "\u2069"; // pop directional isolate
 
   const meta = META[code] ?? { emoji: "💱", fa: r.fa || r.title || code.toUpperCase() };
   const titleLine = `${LRI}${qty}${PDI} ${RLI}${meta.fa}${PDI} ${LRI}${meta.emoji}${PDI}`;
@@ -1115,7 +1295,7 @@ function replyGold(rGold: Rate, amount: number, stored: Stored) {
   const refUnit = Math.max(1, rGold.unit || 1);
   const qty = amount || 1;
 
-  const perRefToman = rGold.price;
+  const perRefToman = rGold.price; // price for refUnit (usually 1)
   const per1Toman = rGold.price / refUnit;
   const totalToman = per1Toman * (qty * refUnit);
 
@@ -1171,6 +1351,10 @@ function getHelpMessage() {
 🔸 نرخ تتر/دلار از بازار آزاد گرفته می‌شود.`;
 }
 
+// -----------------------------
+// Request parsing
+// -----------------------------
+
 async function safeJson<T>(req: Request): Promise<T | null> {
   try {
     return (await req.json()) as T;
@@ -1178,6 +1362,10 @@ async function safeJson<T>(req: Request): Promise<T | null> {
     return null;
   }
 }
+
+// -----------------------------
+// Worker entry
+// -----------------------------
 
 export default {
   async scheduled(_event: ScheduledEvent, _env: Env, ctx: ExecutionContext) {
@@ -1210,6 +1398,7 @@ export default {
     const update = await safeJson<TgUpdate>(req);
     if (update?.edited_message) return new Response("ok");
 
+    // -------- callback query handler --------
     if (update?.callback_query) {
       const cb = update.callback_query;
       const data = cb.data;
@@ -1268,6 +1457,7 @@ export default {
       return new Response("ok");
     }
 
+    // -------- message handler --------
     const msg = update?.message;
     if (!msg) return new Response("ok");
 
@@ -1329,6 +1519,13 @@ export default {
 
       const stored = await getStoredOrRefresh(env, ctx);
 
+      if (cmd === "/all") {
+        const out = buildAll(stored);
+        const chunks = chunkText(out, 3800);
+        for (const c of chunks) await tgSend(env, chatId, c, replyTo);
+        return;
+      }
+
       const parsed = getParsedIntent(userId, textNorm, stored.rates, RUNTIME_RATES_CACHE?.alias);
       if (!parsed.code) return;
 
@@ -1375,3 +1572,5 @@ function computeDefaultListsFromRates(rates: Record<string, Rate>): { fiat: stri
 
   return { fiat: [...goldCodes, ...currencyCodes], crypto: cryptoCodes };
 }
+
+
