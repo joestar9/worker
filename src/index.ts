@@ -322,15 +322,11 @@ function buildAliasIndexCache(stored: Stored): AliasIndexCache {
 // -----------------------------
 
 function pickCobaltUrl(text: string): string | null {
-  // Prefer full URLs, but also accept bare domains like x.com/... when users omit the scheme.
-  const m =
-    text.match(/https?:\/\/[^\s<>()]+/i) ??
-    text.match(/\b(?:x\.com|twitter\.com|t\.co|fixupx\.com|vxtwitter\.com|fxtwitter\.com|xtwitter\.com|instagram\.com)\/[^\s<>()]+/i);
+  const m = text.match(/https?:\/\/[^\s<>()]+/i);
   if (!m) return null;
 
   // trim common trailing punctuation when users paste links in text
-  const raw0 = m[0].replace(/[)\]}>,.!?؟؛:]+$/g, "");
-  const raw = raw0.startsWith("http://") || raw0.startsWith("https://") ? raw0 : `https://${raw0}`;
+  const raw = m[0].replace(/[)\]}>,.!?؟؛:]+$/g, "");
 
   try {
     const u = new URL(raw);
@@ -421,33 +417,49 @@ async function processCobaltResponse(env: Env, chatId: number, data: unknown, re
 
 
 // -----------------------------
-// Twitter/X direct file download (NO cobalt, NO third-party JSON APIs)
-// Strategy: fetch HTML from "embed-fixer" sites (fixupx/vxtwitter/fxtwitter/xtwitter) and
-// extract direct media URLs (video.twimg.com / pbs.twimg.com). Then send as Telegram media.
+// Twitter/X file-only downloader (no official API; no Cobalt)
+// Uses public "fixer" mirrors (fixupx/vxtwitter/fxtwitter/xtwitter) to extract direct media URLs.
+// Optional /twproxy endpoint is provided to help Telegram fetch media when direct hosts are blocked.
 // -----------------------------
 
 type TwitterMediaItem = { type: "video" | "photo"; url: string };
 
-const TWITTER_DL_HOSTS = new Set([
-  "twitter.com",
-  "x.com",
-  "mobile.twitter.com",
-  "t.co",
-  "fxtwitter.com",
-  "vxtwitter.com",
-  "fixupx.com",
-  "xtwitter.com",
-]);
+const TWITTER_FIXER_HOSTS = ["fixupx.com", "vxtwitter.com", "fxtwitter.com", "xtwitter.com"] as const;
 
-const TWITTER_FIXER_HOSTS = ["vxtwitter.com", "fixupx.com", "fxtwitter.com", "xtwitter.com"] as const;
-
-function isTwitterDownloadHost(host: string) {
-  const h = host.toLowerCase();
-  return TWITTER_DL_HOSTS.has(h) || h.endsWith(".twitter.com") || h.endsWith(".x.com");
+function isTwitterLikeHost(hostname: string): boolean {
+  const h = hostname.toLowerCase();
+  return (
+    h === "twitter.com" ||
+    h.endsWith(".twitter.com") ||
+    h === "x.com" ||
+    h.endsWith(".x.com") ||
+    h === "t.co" ||
+    h === "fixupx.com" ||
+    h === "vxtwitter.com" ||
+    h === "fxtwitter.com" ||
+    h === "xtwitter.com"
+  );
 }
 
 function sleep(ms: number) {
   return new Promise<void>((r) => setTimeout(r, ms));
+}
+
+async function resolveFinalUrlMaybe(url: string): Promise<string> {
+  try {
+    // Some hosts block HEAD; use GET and follow redirects.
+    const res = await fetch(url, {
+      method: "GET",
+      redirect: "follow",
+      headers: {
+        "User-Agent": "Mozilla/5.0",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      },
+    });
+    return res.url || url;
+  } catch {
+    return url;
+  }
 }
 
 function cleanUrlFromHtml(raw: string) {
@@ -458,252 +470,92 @@ function cleanUrlFromHtml(raw: string) {
   s = s.replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#39;/g, "'");
   // strip wrapping quotes
   s = s.replace(/^['"]+|['"]+$/g, "");
-  // trim punctuation
-  s = s.replace(/[)\]}
-
-function resolveMaybeRelative(baseUrl: string, raw: string): string {
-  const s0 = cleanUrlFromHtml(raw);
-  if (!s0) return s0;
-  if (s0.startsWith("http://") || s0.startsWith("https://")) return s0;
-  if (s0.startsWith("//")) return `https:${s0}`;
-  if (s0.startsWith("/")) {
-    try {
-      return new URL(s0, baseUrl).toString();
-    } catch {
-      return s0;
-    }
-  }
-  return s0;
-}
->,.!?؟؛:]+$/g, "");
+  // trim trailing punctuation sometimes pasted with links
+  s = s.replace(/[)\]}>.,!?؟؛:]+$/g, "");
   return s;
 }
 
-async function resolveFinalUrlMaybe(url: string): Promise<string> {
-  // Used mainly for t.co links (and some redirecting fixer URLs)
-  const headers = {
-    "User-Agent": "Mozilla/5.0 (compatible; TelegramBot/1.0)",
-    Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-  } as const;
-
-  // A single GET with redirect follow is usually enough; we cancel body to avoid download cost.
+function resolveMaybeRelative(base: string, raw: string) {
+  const s = cleanUrlFromHtml(raw);
   try {
-    const res = await fetch(url, { method: "GET", redirect: "follow", headers });
-    res.body?.cancel();
-    return res.url || url;
+    return new URL(s, base).toString();
   } catch {
-    return url;
+    return "";
   }
 }
 
 function extractTweetId(u: URL): string | null {
-  // Common forms:
-  // /{user}/status/{id}
-  // /i/status/{id}
-  // /status/{id}
-  const m = u.pathname.match(/\/status\/(\d+)/i);
-  if (m?.[1]) return m[1];
-  const m2 = u.pathname.match(/\/i\/status\/(\d+)/i);
-  if (m2?.[1]) return m2[1];
-  const m3 = u.pathname.match(/\/(\d{10,})/); // fallback
-  return m3?.[1] || null;
+  // /{user}/status/{id} or /i/status/{id} or /status/{id}
+  const parts = u.pathname.split("/").filter(Boolean);
+  for (let i = 0; i < parts.length - 1; i++) {
+    const p = parts[i].toLowerCase();
+    if (p === "status" || p === "statuses") {
+      const id = parts[i + 1] || "";
+      const m = id.match(/^(\d{6,25})/);
+      if (m) return m[1];
+    }
+  }
+  const m2 = u.pathname.match(/\/i\/status\/(\d{6,25})/i);
+  return m2 ? m2[1] : null;
 }
 
 function extractScreenName(u: URL): string | null {
-  // /{user}/status/{id}
   const parts = u.pathname.split("/").filter(Boolean);
-  if (parts.length >= 3 && parts[1] === "status") {
-    const user = parts[0];
-    // ignore reserved words
-    if (user && user !== "i" && user !== "status") return user;
-  }
+  if (!parts.length) return null;
+  // user/status/id
+  const user = parts[0];
+  if (user && user !== "i" && user.toLowerCase() !== "status") return user;
   return null;
 }
 
-async function fetchHtmlWithRetry(url: string, attempts = 3): Promise<string> {
-  const headers = {
-    "User-Agent": "Mozilla/5.0 (compatible; TelegramBot/1.0)",
-    Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Cache-Control": "no-cache",
-    Pragma: "no-cache",
-  } as const;
-
+async function fetchHtmlWithRetry(url: string, tries = 3): Promise<string> {
   let lastErr: unknown = null;
-  for (let i = 0; i < attempts; i++) {
+  for (let i = 0; i < tries; i++) {
     try {
-      const res = await fetch(url, { method: "GET", redirect: "follow", headers });
-      if (!res.ok) {
-        // Retry on throttling / transient failures
-        if (res.status === 429 || (res.status >= 500 && res.status <= 599)) {
-          lastErr = new Error(`HTTP ${res.status}`);
-        } else {
-          // Non-retryable
-          throw new Error(`HTTP ${res.status}`);
-        }
-      } else {
-        const text = await res.text();
-        if (text && text.length > 0) return text;
-        lastErr = new Error("Empty HTML");
-      }
+      const res = await fetch(url, {
+        method: "GET",
+        redirect: "follow",
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.text();
     } catch (e) {
       lastErr = e;
-    }
-
-    // backoff with small jitter
-    const backoff = 250 * (i + 1) + Math.floor(Math.random() * 120);
-    await sleep(backoff);
-  }
-  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
-}
-
-function extractMetaContents(html: string, key: string): string[] {
-  // Match <meta property="key" content="..."> OR <meta name="key" content="...">
-  const out: string[] = [];
-  const k = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const re = new RegExp(`<meta\\s+[^>]*(?:property|name)=["']${k}["'][^>]*>`, "ig");
-  // content can be quoted or (rarely) unquoted
-  const contentRe = /content=(?:"([^"]+)"|'([^']+)'|([^\s>]+))/i;
-
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(html)) !== null) {
-    const tag = m[0];
-    const c = contentRe.exec(tag);
-    const v = (c?.[1] ?? c?.[2] ?? c?.[3]) || "";
-    if (v) out.push(cleanUrlFromHtml(v));
-  }
-  return out;
-}
-
-function parseTwitterMediaFromHtml(html: string, baseUrl: string): TwitterMediaItem[] {
-  const urls = new Set<string>();
-  const metaVideo = new Set<string>(); // URLs that came from video-related meta tags
-
-  // Meta tags used by many fixer sites
-  const metaKeys = [
-    "twitter:player:stream",
-    "twitter:player:stream:url",
-    "og:video:secure_url",
-    "og:video",
-    "og:image:secure_url",
-    "og:image",
-    "twitter:image",
-  ];
-  for (const k of metaKeys) {
-    for (const v0 of extractMetaContents(html, k)) {
-      const v = resolveMaybeRelative(baseUrl, v0);
-      if (!v) continue;
-      urls.add(v);
-      if (k.includes("video") || k.includes("player:stream")) metaVideo.add(cleanUrlFromHtml(v));
+      await sleep(150 * (i + 1));
     }
   }
-
-  // Direct URL regex scans (also catches embedded JSON or scripts)
-  const reVideoTwimg = /https?:\/\/video\.twimg\.com\/[^\s"'<>\\]+/g;
-  const rePhotoTwimg = /https?:\/\/pbs\.twimg\.com\/[^\s"'<>\\]+/g;
-
-  // Any direct mp4 links (some fixer sites host/proxy mp4s on their own domain)
-  const reAnyMp4 = /https?:\/\/[^\s"'<>\\]+?\.mp4(?:\?[^\s"'<>\\]*)?/gi;
-
-  const pushAll = (re: RegExp) => {
-    const ms = html.match(re);
-    if (!ms) return;
-    for (const raw of ms) urls.add(resolveMaybeRelative(baseUrl, raw));
-  };
-  pushAll(reVideoTwimg);
-  pushAll(rePhotoTwimg);
-  pushAll(reAnyMp4);
-
-  // Handle escaped https:\/\/... forms (common inside JSON)
-  const reEscAnyMp4 = /https?:\\\/\\\/[^"'\s<>\\]+?\.mp4(?:\\\?[^"'\s<>\\]*)?/gi;
-  const reEscTwimgVideo = /https?:\\\/\\\/video\.twimg\.com\\\/[^"'\s<>\\]+/g;
-  const reEscTwimgPhoto = /https?:\\\/\\\/pbs\.twimg\.com\\\/[^"'\s<>\\]+/g;
-
-  const msEV = html.match(reEscTwimgVideo);
-  if (msEV) for (const raw of msEV) urls.add(resolveMaybeRelative(baseUrl, raw));
-  const msEP = html.match(reEscTwimgPhoto);
-  if (msEP) for (const raw of msEP) urls.add(resolveMaybeRelative(baseUrl, raw));
-  const msEM = html.match(reEscAnyMp4);
-  if (msEM) for (const raw of msEM) urls.add(resolveMaybeRelative(baseUrl, raw));
-
-  // Generic attribute scan for relative URLs (href/src/content) that contain media references
-  const attrRe = /\b(?:content|src|href)=["']([^"']+)["']/gi;
-  let m: RegExpExecArray | null;
-  while ((m = attrRe.exec(html)) !== null) {
-    const v = m[1];
-    if (!v) continue;
-    const s = resolveMaybeRelative(baseUrl, v);
-    if (!s) continue;
-
-    // keep only things that are very likely media or lead to it
-    if (
-      s.includes("video.twimg.com") ||
-      s.includes("pbs.twimg.com") ||
-      /\.mp4(\?|$)/i.test(s) ||
-      /\.(jpe?g|png|webp)(\?|$)/i.test(s) ||
-      s.includes("/download") ||
-      s.includes("dl=1") ||
-      s.includes("download=")
-    ) {
-      urls.add(s);
-    }
-  }
-
-  const items: TwitterMediaItem[] = [];
-  for (const u of urls) {
-    const url = cleanUrlFromHtml(u);
-
-    // Ignore playlist streams; Telegram can't send m3u8 as a video file
-    if (url.includes(".m3u8")) continue;
-
-    const fromMetaVideo = metaVideo.has(url);
-    const looksLikeVideo =
-      url.includes("video.twimg.com") ||
-      /\.mp4(\?|$)/i.test(url) ||
-      url.includes("format=mp4") ||
-      url.includes("mime=video") ||
-      url.includes("/download") ||
-      url.includes("dl=1") ||
-      url.includes("download=");
-
-    const isVideo = fromMetaVideo || looksLikeVideo;
-    const isPhoto =
-      url.includes("pbs.twimg.com/media/") ||
-      url.includes("pbs.twimg.com/ext_tw_video_thumb/") ||
-      url.includes("pbs.twimg.com/tweet_video_thumb/") ||
-      (url.includes("pbs.twimg.com/") && /\.(jpe?g|png|webp)(\?|$)/i.test(url));
-
-    if (isVideo) items.push({ type: "video", url });
-    else if (isPhoto) items.push({ type: "photo", url });
-  }
-
-  // De-dup by URL while keeping order
-  const seen = new Set<string>();
-  const out: TwitterMediaItem[] = [];
-  for (const it of items) {
-    if (seen.has(it.url)) continue;
-    seen.add(it.url);
-    out.push(it);
-  }
-  return out;
+  throw lastErr instanceof Error ? lastErr : new Error("fetch_failed");
 }
 
 function pickBestVideoUrl(urls: string[]): string {
-  // Prefer highest resolution where present (…/vid/1280x720/…)
-  let best = urls[0] || "";
+  // Prefer direct mp4; then prefer higher "bitrate=" or "quality=" if present; else longest.
+  let best = "";
   let bestScore = -1;
 
   for (const u of urls) {
-    const m = u.match(/\/vid\/(\d+)x(\d+)\//i);
-    if (m) {
-      const w = parseInt(m[1], 10) || 0;
-      const h = parseInt(m[2], 10) || 0;
-      const score = w * h;
-      if (score > bestScore) {
-        bestScore = score;
-        best = u;
-      }
-    } else if (bestScore < 0 && u.length > best.length) {
+    const low = u.toLowerCase();
+    const isMp4 = /\.mp4(\?|$)/i.test(low) || low.includes("format=mp4") || low.includes("mime=video");
+    let score = isMp4 ? 10_000 : 0;
+
+    // bitrate=xxxx
+    const br = low.match(/[?&]bitrate=(\d+)/);
+    if (br) score += Math.min(9_999, parseInt(br[1], 10) || 0);
+
+    // quality=hd
+    if (low.includes("quality=hd")) score += 500;
+
+    // Prefer video.twimg.com generally
+    if (low.includes("video.twimg.com")) score += 1_000;
+
+    // tie-break by length
+    score += Math.min(500, u.length);
+
+    if (score > bestScore) {
+      bestScore = score;
       best = u;
     }
   }
@@ -712,19 +564,94 @@ function pickBestVideoUrl(urls: string[]): string {
 
 function normalizePhotoUrl(url: string): string {
   // Ask for original size where supported
-  if (url.includes("name=")) {
-    return url.replace(/name=[^&]+/i, "name=orig");
-  }
+  if (url.includes("name=")) return url.replace(/name=[^&]+/i, "name=orig");
   return url.includes("?") ? `${url}&name=orig` : `${url}?name=orig`;
+}
+
+function parseTwitterMediaFromHtml(html: string, baseUrl: string): TwitterMediaItem[] {
+  const found = new Map<string, "video" | "photo">();
+
+  const add = (type: "video" | "photo", raw: string) => {
+    const abs = resolveMaybeRelative(baseUrl, raw);
+    if (!abs) return;
+    const u = cleanUrlFromHtml(abs);
+    if (!u) return;
+    if (!found.has(u)) found.set(u, type);
+  };
+
+  // 1) meta tags: grab anything with content=URL and (name/property) containing "video"/"image"/"player"
+  const metaTagRe = /<meta\s+[^>]*>/gi;
+  const keyRe = /\b(?:property|name)=["']([^"']+)["']/i;
+  const contentRe = /\bcontent=(?:"([^"]+)"|'([^']+)'|([^\s>]+))/i;
+
+  let mm: RegExpExecArray | null;
+  while ((mm = metaTagRe.exec(html)) !== null) {
+    const tag = mm[0];
+    const contM = contentRe.exec(tag);
+    if (!contM) continue;
+    const raw = (contM[1] ?? contM[2] ?? contM[3] ?? "").trim();
+    if (!raw) continue;
+
+    const key = (keyRe.exec(tag)?.[1] ?? "").toLowerCase();
+    if (key.includes("image")) add("photo", raw);
+    else if (key.includes("video") || key.includes("player") || key.includes("stream")) add("video", raw);
+  }
+
+  // 2) direct media URLs present in HTML
+  const reVideoTwimg = /https?:\/\/video\.twimg\.com\/[^\s"'<>\\]+/gi;
+  const rePhotoTwimg = /https?:\/\/pbs\.twimg\.com\/[^\s"'<>\\]+/gi;
+  // mp4 direct OR mp4 via query like ?format=mp4
+  const reAnyMp4Like =
+    /https?:\/\/[^\s"'<>\\]+(?:\.mp4(?:\?[^\s"'<>\\]*)?|\?[^\s"'<>\\]*(?:format=mp4|mime=video%2Fmp4|mime=video\/mp4)[^\s"'<>\\]*)/gi;
+
+  for (const m of html.match(reVideoTwimg) || []) add("video", m);
+  for (const m of html.match(reAnyMp4Like) || []) add("video", m);
+  for (const m of html.match(rePhotoTwimg) || []) add("photo", m);
+
+  // 3) escaped URLs inside JSON (common on fixer pages)
+  const reEscAnyMp4Like =
+    /https?:\\\/\\\/[^"'\s<>\\]+(?:\.mp4(?:\\\?[^"'\s<>\\]*)?|\\\?[^"'\s<>\\]*(?:format=mp4|mime=video%2Fmp4|mime=video%2Fmp4)[^"'\s<>\\]*)/gi;
+  for (const em of html.match(reEscAnyMp4Like) || []) add("video", em.replace(/\\\//g, "/"));
+
+  const reEscPhotoTwimg = /https?:\\\/\\\/pbs\.twimg\.com\\\/[^"'\s<>\\]+/gi;
+  for (const em of html.match(reEscPhotoTwimg) || []) add("photo", em.replace(/\\\//g, "/"));
+
+  // 4) attributes (src/href/content)
+  const attrRe = /\b(?:src|href|content)=["']([^"']+)["']/gi;
+  let am: RegExpExecArray | null;
+  while ((am = attrRe.exec(html)) !== null) {
+    const v = am[1] || "";
+    if (!v) continue;
+    const low = v.toLowerCase();
+    if (low.includes("video.twimg.com") || low.includes(".mp4") || low.includes("format=mp4") || low.includes("mime=video")) add("video", v);
+    else if (low.includes("pbs.twimg.com") || low.match(/\.(jpg|jpeg|png|webp)(\?|$)/i)) add("photo", v);
+  }
+
+  // Build output with stable ordering: video(s) first, then photos
+  const videos: string[] = [];
+  const photos: string[] = [];
+
+  for (const [u, t] of found.entries()) {
+    if (t === "video") videos.push(u);
+    else photos.push(u);
+  }
+
+  const out: TwitterMediaItem[] = [];
+  if (videos.length) out.push({ type: "video", url: pickBestVideoUrl(videos) });
+  for (const p of photos.slice(0, 10)) out.push({ type: "photo", url: normalizePhotoUrl(p) });
+
+  return out;
 }
 
 async function extractTwitterMediaViaFixers(inputUrl: string): Promise<TwitterMediaItem[]> {
   let url = inputUrl;
 
-  // Resolve t.co and similar shorteners
-  const u0 = new URL(url);
-  if (u0.hostname.toLowerCase() === "t.co") {
-    url = await resolveFinalUrlMaybe(url);
+  // Resolve t.co shorteners first
+  try {
+    const u0 = new URL(url);
+    if (u0.hostname.toLowerCase() === "t.co") url = await resolveFinalUrlMaybe(url);
+  } catch {
+    // ignore
   }
 
   const u = new URL(url);
@@ -733,14 +660,13 @@ async function extractTwitterMediaViaFixers(inputUrl: string): Promise<TwitterMe
   const inHost = u.hostname.toLowerCase();
 
   const candidates: string[] = [];
-
   const addCandidate = (x: string) => {
     if (!x) return;
     if (!candidates.includes(x)) candidates.push(x);
   };
 
   // If user already sent a fixer link, try it first.
-  if (TWITTER_FIXER_HOSTS.includes(inHost as any)) addCandidate(url);
+  if ((TWITTER_FIXER_HOSTS as readonly string[]).includes(inHost)) addCandidate(url);
 
   if (tweetId) {
     for (const host of TWITTER_FIXER_HOSTS) {
@@ -749,55 +675,86 @@ async function extractTwitterMediaViaFixers(inputUrl: string): Promise<TwitterMe
       addCandidate(`https://${host}/status/${tweetId}`);
     }
   } else {
-    // last resort: try the original URL (may still work if it's already a fixer page)
     addCandidate(url);
   }
 
-  // Try each candidate (with retry) until we find media.
   for (const c of candidates) {
     try {
       const html = await fetchHtmlWithRetry(c, 3);
       const items = parseTwitterMediaFromHtml(html, c);
       if (!items.length) continue;
-
-      // Prefer video if present; if multiple variants exist, pick best one.
-      const videos = items.filter((x) => x.type === "video").map((x) => x.url);
-      const photos = items.filter((x) => x.type === "photo").map((x) => x.url);
-
-      const out: TwitterMediaItem[] = [];
-      if (videos.length) out.push({ type: "video", url: pickBestVideoUrl(videos) });
-      for (const p of photos.slice(0, 8)) out.push({ type: "photo", url: normalizePhotoUrl(p) });
-
-      if (out.length) return out;
+      // If we got a "video" but it's not direct, try resolving once.
+      const vid = items.find((x) => x.type === "video");
+      if (vid) {
+        const low = vid.url.toLowerCase();
+        const needsResolve =
+          low.includes("/download") ||
+          low.includes("dl=1") ||
+          low.includes("download=") ||
+          (!low.includes("video.twimg.com") && !/\.mp4(\?|$)/i.test(low) && !low.includes("format=mp4") && !low.includes("mime=video"));
+        if (needsResolve) vid.url = await resolveFinalUrlMaybe(vid.url);
+      }
+      return items;
     } catch (e) {
-      // Try next candidate
       const msg = e instanceof Error ? e.message : String(e);
       console.error("Twitter fixer fetch failed:", c, msg);
     }
   }
-
   return [];
 }
 
-type TgInputMedia = { type: "photo" | "video"; media: string; caption?: string; parse_mode?: string };
-
-async function tgSendMediaGroup(env: Env, chatId: number, media: TgInputMedia[], replyTo?: number) {
-  const body: Record<string, unknown> = { chat_id: chatId, media };
-  if (replyTo) {
-    body.reply_to_message_id = replyTo;
-    body.allow_sending_without_reply = true;
+function isProxyAllowedMedia(u: URL): boolean {
+  const h = u.hostname.toLowerCase();
+  if (h === "video.twimg.com" || h === "pbs.twimg.com") return true;
+  if ((TWITTER_FIXER_HOSTS as readonly string[]).includes(h)) {
+    const full = `${u.pathname}${u.search}`.toLowerCase();
+    return full.includes(".mp4") || full.includes("format=mp4") || full.includes("mime=video");
   }
-  const res = await fetch(`${tgBase(env)}/sendMediaGroup`, {
-    method: "POST",
-    headers: TG_JSON_HEADERS,
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) console.error("TG MediaGroup Error:", await res.text());
-  return res.ok;
+  return false;
 }
 
+async function handleTwitterProxy(req: Request): Promise<Response> {
+  const url = new URL(req.url);
+  const raw = url.searchParams.get("u") || "";
+  if (!raw) return new Response("missing u", { status: 400 });
 
-async function tgSendVideoDirect(env: Env, chatId: number, videoUrl: string, caption: string, replyTo?: number) {
+  let target: URL;
+  try {
+    target = new URL(raw);
+  } catch {
+    try {
+      target = new URL(decodeURIComponent(raw));
+    } catch {
+      return new Response("bad u", { status: 400 });
+    }
+  }
+
+  if (target.protocol !== "http:" && target.protocol !== "https:") return new Response("bad scheme", { status: 400 });
+  if (!isProxyAllowedMedia(target)) return new Response("forbidden", { status: 403 });
+
+  const method = req.method === "HEAD" ? "HEAD" : "GET";
+  const headers: Record<string, string> = {
+    "User-Agent": "Mozilla/5.0",
+    Accept: "*/*",
+    Referer: "https://twitter.com/",
+  };
+  const range = req.headers.get("Range");
+  if (range) headers.Range = range;
+
+  const res = await fetch(target.toString(), { method, headers, redirect: "follow" });
+
+  const outHeaders = new Headers();
+  for (const k of ["content-type", "content-length", "accept-ranges", "content-range", "etag", "last-modified", "cache-control"]) {
+    const v = res.headers.get(k);
+    if (v) outHeaders.set(k, v);
+  }
+  // Help Telegram/CDNs cache a bit (safe for immutable twimg URLs)
+  if (!outHeaders.get("cache-control")) outHeaders.set("cache-control", "public, max-age=86400");
+
+  return new Response(method === "HEAD" ? null : res.body, { status: res.status, headers: outHeaders });
+}
+
+async function tgTrySendVideoUrl(env: Env, chatId: number, videoUrl: string, caption: string, replyTo?: number) {
   const body: Record<string, unknown> = { chat_id: chatId, video: videoUrl, caption, parse_mode: TG_PARSE_MODE, supports_streaming: true };
   if (replyTo) {
     body.reply_to_message_id = replyTo;
@@ -808,7 +765,7 @@ async function tgSendVideoDirect(env: Env, chatId: number, videoUrl: string, cap
   return res.ok;
 }
 
-async function tgSendPhotoDirect(env: Env, chatId: number, photoUrl: string, caption: string, replyTo?: number) {
+async function tgTrySendPhotoUrl(env: Env, chatId: number, photoUrl: string, caption: string, replyTo?: number) {
   const body: Record<string, unknown> = { chat_id: chatId, photo: photoUrl, caption, parse_mode: TG_PARSE_MODE };
   if (replyTo) {
     body.reply_to_message_id = replyTo;
@@ -819,7 +776,7 @@ async function tgSendPhotoDirect(env: Env, chatId: number, photoUrl: string, cap
   return res.ok;
 }
 
-async function tgSendDocumentDirect(env: Env, chatId: number, docUrl: string, caption: string, replyTo?: number) {
+async function tgTrySendDocumentUrl(env: Env, chatId: number, docUrl: string, caption: string, replyTo?: number) {
   const body: Record<string, unknown> = { chat_id: chatId, document: docUrl, caption, parse_mode: TG_PARSE_MODE };
   if (replyTo) {
     body.reply_to_message_id = replyTo;
@@ -830,8 +787,7 @@ async function tgSendDocumentDirect(env: Env, chatId: number, docUrl: string, ca
   return res.ok;
 }
 
-async function handleTwitterDirectFileDownload(env: Env, chatId: number, targetUrl: string, replyTo?: number) {
-  // show user we're working
+async function handleTwitterDirectFileDownload(env: Env, chatId: number, targetUrl: string, origin: string, replyTo?: number) {
   await fetch(`${tgBase(env)}/sendChatAction`, {
     method: "POST",
     headers: TG_JSON_HEADERS,
@@ -844,71 +800,104 @@ async function handleTwitterDirectFileDownload(env: Env, chatId: number, targetU
     await tgSend(
       env,
       chatId,
-      "❌ نتونستم فایل مدیا رو پیدا کنم یا لینک محدود شده. اگر می‌تونی، همین توییت رو با vxtwitter.com یا fixupx.com باز کن و لینک همون صفحه رو بفرست.",
+      "❌ نتونستم فایل مدیا رو پیدا کنم یا لینک محدود شده.\nاگر می‌تونی لینک همون توییت رو با vxtwitter.com یا fixupx.com یا xtwitter.com باز کن و لینک همون صفحه رو بفرست.",
       replyTo,
     );
     return true;
   }
 
-  // Send as Telegram media (NOT as a plain link message).
-  // Note: Telegram will fetch the URL server-side; the user receives an actual video/photo/file message.
-  if (items.length === 1) {
-    const it = items[0];
-    let finalUrl = it.url;
+  const video = items.find((x) => x.type === "video");
+  const photos = items.filter((x) => x.type === "photo").map((x) => x.url);
 
-    // Some fixer sites expose "download" URLs or non-mp4 redirects. Resolve to a final direct URL when needed.
-    if (it.type === "video") {
-      const needsResolve =
-        finalUrl.includes("/download") ||
-        finalUrl.includes("dl=1") ||
-        finalUrl.includes("download=") ||
-        (!finalUrl.includes("video.twimg.com") && !/\.mp4(\?|$)/i.test(finalUrl));
+  const cap = `@${BOT_USERNAME} ✅`;
 
-      if (needsResolve) finalUrl = await resolveFinalUrlMaybe(finalUrl);
+  if (video) {
+    let vurl = video.url;
+    // One more resolve if needed
+    const low = vurl.toLowerCase();
+    const needsResolve =
+      low.includes("/download") ||
+      low.includes("dl=1") ||
+      low.includes("download=") ||
+      (!low.includes("video.twimg.com") && !/\.mp4(\?|$)/i.test(low) && !low.includes("format=mp4") && !low.includes("mime=video"));
+    if (needsResolve) vurl = await resolveFinalUrlMaybe(vurl);
 
-      let ok = await tgSendVideoDirect(env, chatId, finalUrl, "@worker093578bot ✅", replyTo);
-      if (!ok) ok = await tgSendDocumentDirect(env, chatId, finalUrl, "@worker093578bot ✅", replyTo);
-      if (!ok) await tgSend(env, chatId, "❌ تلگرام نتونست این فایل رو از لینک دریافت کنه.", replyTo);
-      return true;
+    // If it's still not a direct video URL, try a second-hop HTML parse (some fixer pages link to an intermediate player URL).
+    const low2 = vurl.toLowerCase();
+    const stillNotDirect =
+      !low2.includes("video.twimg.com") &&
+      !/\.mp4(\?|$)/i.test(low2) &&
+      !low2.includes("format=mp4") &&
+      !low2.includes("mime=video");
+    if (stillNotDirect) {
+      try {
+        const html2 = await fetchHtmlWithRetry(vurl, 2);
+        const more = parseTwitterMediaFromHtml(html2, vurl);
+        const v2 = more.find((x) => x.type === "video");
+        if (v2) vurl = v2.url;
+      } catch {
+        // ignore
+      }
     }
 
-    let ok = await tgSendPhotoDirect(env, chatId, finalUrl, "@worker093578bot ✅", replyTo);
-    if (!ok) ok = await tgSendDocumentDirect(env, chatId, finalUrl, "@worker093578bot ✅", replyTo);
-    if (!ok) await tgSend(env, chatId, "❌ تلگرام نتونست این فایل رو از لینک دریافت کنه.", replyTo);
+    // Try direct first
+    let ok = await tgTrySendVideoUrl(env, chatId, vurl, cap, replyTo);
+
+    // If Telegram can't fetch it directly, try proxy through this Worker
+    if (!ok) {
+      try {
+        const pu = new URL(vurl);
+        if (isProxyAllowedMedia(pu)) {
+          const proxyUrl = `${origin}/twproxy?u=${encodeURIComponent(vurl)}`;
+          ok = await tgTrySendVideoUrl(env, chatId, proxyUrl, cap, replyTo);
+          if (!ok) ok = await tgTrySendDocumentUrl(env, chatId, proxyUrl, cap, replyTo);
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    if (!ok) await tgSend(env, chatId, "❌ تلگرام نتونست این ویدیو رو دریافت کنه.", replyTo);
+
+    // Optionally send photos after the main video (quietly)
+    for (const p of photos.slice(0, 6)) {
+      let sent = await tgTrySendPhotoUrl(env, chatId, p, "", replyTo);
+      if (!sent) {
+        try {
+          const pu = new URL(p);
+          if (isProxyAllowedMedia(pu)) sent = await tgTrySendPhotoUrl(env, chatId, `${origin}/twproxy?u=${encodeURIComponent(p)}`, "", replyTo);
+        } catch {
+          // ignore
+        }
+      }
+      if (!sent) break;
+    }
+
     return true;
   }
 
-  const media: TgInputMedia[] = items.slice(0, 10).map((it, i) => {
-    const m: TgInputMedia = { type: it.type === "video" ? "video" : "photo", media: it.url };
-    if (i === 0) {
-      m.caption = "@worker093578bot ✅";
-      m.parse_mode = TG_PARSE_MODE;
-    }
-    return m;
-  });
+  // No video; send photos as files
+  if (photos.length) {
+    let first = true;
+    for (const p of photos.slice(0, 10)) {
+      const caption = first ? cap : "";
+      first = false;
 
-  const groupOk = await tgSendMediaGroup(env, chatId, media, replyTo);
-
-  // If media-group fails, fall back to sequential sends.
-  if (!groupOk) {
-    for (const it of items.slice(0, 10)) {
-      if (it.type === "video") {
-        const needsResolve =
-          it.url.includes("/download") ||
-          it.url.includes("dl=1") ||
-          it.url.includes("download=") ||
-          (!it.url.includes("video.twimg.com") && !/\.mp4(\?|$)/i.test(it.url));
-        const vurl = needsResolve ? await resolveFinalUrlMaybe(it.url) : it.url;
-
-        const ok = await tgSendVideoDirect(env, chatId, vurl, "", replyTo);
-        if (!ok) await tgSendDocumentDirect(env, chatId, vurl, "", replyTo);
-      } else {
-        const ok = await tgSendPhotoDirect(env, chatId, it.url, "", replyTo);
-        if (!ok) await tgSendDocumentDirect(env, chatId, it.url, "", replyTo);
+      let ok = await tgTrySendPhotoUrl(env, chatId, p, caption, replyTo);
+      if (!ok) {
+        try {
+          const pu = new URL(p);
+          if (isProxyAllowedMedia(pu)) ok = await tgTrySendPhotoUrl(env, chatId, `${origin}/twproxy?u=${encodeURIComponent(p)}`, caption, replyTo);
+          if (!ok) ok = await tgTrySendDocumentUrl(env, chatId, `${origin}/twproxy?u=${encodeURIComponent(p)}`, caption, replyTo);
+        } catch {
+          // ignore
+        }
       }
     }
+    return true;
   }
 
+  await tgSend(env, chatId, "❌ این پست مدیای قابل دانلود پیدا نشد.", replyTo);
   return true;
 }
 
@@ -1464,7 +1453,7 @@ async function tgAnswerCallback(env: Env, callbackQueryId: string, text?: string
 }
 
 async function tgSendVideo(env: Env, chatId: number, videoUrl: string | undefined, caption: string, replyTo?: number) {
-  const body: Record<string, unknown> = { chat_id: chatId, video: videoUrl, caption, parse_mode: TG_PARSE_MODE, supports_streaming: true };
+  const body: Record<string, unknown> = { chat_id: chatId, video: videoUrl, caption, parse_mode: TG_PARSE_MODE };
   if (replyTo) {
     body.reply_to_message_id = replyTo;
     body.allow_sending_without_reply = true;
@@ -1873,6 +1862,7 @@ export default {
 
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
+    const origin = url.origin;
     if (url.pathname === "/health") return new Response("ok");
 
     if (url.pathname === "/refresh") {
@@ -1888,6 +1878,10 @@ export default {
           status: 502,
         });
       }
+    }
+
+    if (url.pathname === "/twproxy" && (req.method === "GET" || req.method === "HEAD")) {
+      return await handleTwitterProxy(req);
     }
 
     if (url.pathname !== "/telegram" || req.method !== "POST") return new Response("Not Found", { status: 404 });
@@ -1974,29 +1968,26 @@ export default {
     const replyTo = isGroup ? messageId : undefined;
 
     const cooldownKey = `cooldown:${userId}`;
-    const lastMsStr = await env.BOT_KV.get(cooldownKey);
-    if (lastMsStr) {
-      const lastMs = Number(lastMsStr) || 0;
-      if (Date.now() - lastMs < 5_000) return new Response("ok");
+    const nowMs = Date.now();
+    const rawCooldown = await env.BOT_KV.get(cooldownKey);
+    if (rawCooldown) {
+      const lastMs = Number(rawCooldown);
+      if (Number.isFinite(lastMs) && nowMs - lastMs < 5000) return new Response("ok");
     }
-    // Cloudflare KV requires expiration_ttl >= 60 seconds. We keep the real cooldown at 5s using timestamp logic.
-    ctx.waitUntil(env.BOT_KV.put(cooldownKey, String(Date.now()), { expirationTtl: 60 }));
+    // Cloudflare KV minimum expiration_ttl is 60 seconds; we store a timestamp and enforce a 5s window ourselves.
+    ctx.waitUntil(env.BOT_KV.put(cooldownKey, String(nowMs), { expirationTtl: 60 }));
+
     const textNorm = norm(text);
     const cmd = normalizeCommand(textNorm);
 
     const run = async () => {
       const downloadUrl = pickCobaltUrl(text);
       if (downloadUrl) {
-        let host = "";
         try {
-          host = new URL(downloadUrl).hostname.toLowerCase();
+          const u = new URL(downloadUrl);
+          if (isTwitterLikeHost(u.hostname)) await handleTwitterDirectFileDownload(env, chatId, downloadUrl, origin, replyTo);
+          else await handleCobaltPublicDownload(env, chatId, downloadUrl, replyTo);
         } catch {
-          host = "";
-        }
-
-        if (host && isTwitterDownloadHost(host)) {
-          await handleTwitterDirectFileDownload(env, chatId, downloadUrl, replyTo);
-        } else {
           await handleCobaltPublicDownload(env, chatId, downloadUrl, replyTo);
         }
         return;
