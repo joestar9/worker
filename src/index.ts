@@ -622,7 +622,6 @@ function parsePersianNumber(tokens: string[]): number | null {
     سیصد: 300,
     چهارصد: 400,
     پانصد: 500,
-	نیم کیلو: 500,
     ششصد: 600,
     شیشصد: 600,
     هفتصد: 700,
@@ -630,7 +629,6 @@ function parsePersianNumber(tokens: string[]): number | null {
     نهصد: 900,
   };
   const scales: Record<string, number> = {
-	کیلو: 1e3,
     هزار: 1e3,
     میلیون: 1e6,
     ملیون: 1e6,
