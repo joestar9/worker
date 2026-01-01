@@ -243,6 +243,12 @@ function stripPunct(input: string) {
   return input.replace(/[.,!?؟؛:()[\]{}"'«»]/g, " ").replace(/\s+/g, " ").trim();
 }
 
+// Like stripPunct but keeps decimal/thousand separators so we can parse amounts like "0.0001"
+// Also keeps Arabic decimal separator (٫) and thousand separator (٬)
+function stripPunctForNumber(input: string) {
+  return input.replace(/[!?؟؛:()[\]{}"'«»]/g, " ").replace(/\s+/g, " ").trim();
+}
+
 function formatToman(n: number) {
   const x = Math.round(n);
   return x.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
@@ -745,7 +751,9 @@ function parsePersianNumber(tokens: string[]): number | null {
 }
 
 function parseDigitsWithScale(text: string): number | null {
-  const t = normalizeDigits(text);
+  const t = normalizeDigits(text)
+    .replace(/[٬,]/g, "") // remove thousand separators
+    .replace(/٫/g, "."); // Arabic decimal separator
   const m = t.match(/(\d+(?:\.\d+)?)(?:\s*(هزار|میلیون|ملیون|میلیارد|بیلیون|تریلیون|k|m|b))?/i);
   if (!m) return null;
   const num = Number(m[1]);
@@ -808,7 +816,7 @@ function findCode(textNorm: string, rates: Record<string, Rate>, alias?: AliasIn
 
 
 function extractAmountOrNull(textNorm: string): number | null {
-  const cleaned = stripPunct(textNorm).replace(/\s+/g, " ").trim();
+  const cleaned = stripPunctForNumber(textNorm).replace(/\s+/g, " ").trim();
   const digitScaled = parseDigitsWithScale(cleaned);
   if (digitScaled != null && digitScaled > 0) return digitScaled;
 
