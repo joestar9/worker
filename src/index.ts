@@ -243,12 +243,6 @@ function stripPunct(input: string) {
   return input.replace(/[.,!?؟؛:()[\]{}"'«»]/g, " ").replace(/\s+/g, " ").trim();
 }
 
-// Like stripPunct but keeps decimal/thousand separators so we can parse amounts like "0.0001"
-// Also keeps Arabic decimal separator (٫) and thousand separator (٬)
-function stripPunctForNumber(input: string) {
-  return input.replace(/[!?؟؛:()[\]{}"'«»]/g, " ").replace(/\s+/g, " ").trim();
-}
-
 function formatToman(n: number) {
   const x = Math.round(n);
   return x.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
@@ -327,34 +321,42 @@ function buildAliasIndexCache(stored: Stored): AliasIndexCache {
 // Downloader helpers
 // -----------------------------
 
-function pickCobaltUrl(text: string): string | null {
-  const m = text.match(/https?:\/\/[^\s<>()]+/i);
-  if (!m) return null;
+function pickMediaUrls(text: string): string[] {
+  const urls = (text.match(/https?:\/\/[^\s<>()]+/gi) || []).map((u) =>
+    u.replace(/[)\]}>,.!?؟؛:]+$/g, ""),
+  );
 
-  // trim common trailing punctuation when users paste links in text
-  const raw = m[0].replace(/[)\]}>,.!?؟؛:]+$/g, "");
+  const out: string[] = [];
+  for (const raw of urls) {
+    try {
+      const u = new URL(raw);
+      const h = u.hostname.toLowerCase();
 
-  try {
-    const u = new URL(raw);
-    const h = u.hostname.toLowerCase();
+      const ok =
+        h === "instagram.com" ||
+        h.endsWith(".instagram.com") ||
+        h === "twitter.com" ||
+        h.endsWith(".twitter.com") ||
+        h === "x.com" ||
+        h.endsWith(".x.com") ||
+        h === "t.co" ||
+        h === "fxtwitter.com" ||
+        h === "vxtwitter.com" ||
+        h === "fixupx.com" ||
+        h === "tiktok.com" ||
+        h.endsWith(".tiktok.com") ||
+        h === "vm.tiktok.com";
 
-    const ok =
-      h === "instagram.com" ||
-      h.endsWith(".instagram.com") ||
-      h === "twitter.com" ||
-      h.endsWith(".twitter.com") ||
-      h === "x.com" ||
-      h.endsWith(".x.com") ||
-      h === "t.co" ||
-      h === "fxtwitter.com" ||
-      h === "vxtwitter.com" ||
-      h === "fixupx.com";
-
-    return ok ? u.toString() : null;
-  } catch {
-    return null;
+      if (ok) out.push(u.toString());
+    } catch {
+      // ignore
+    }
   }
+
+  // de-dupe while keeping order
+  return [...new Set(out)];
 }
+
 
 async function fetchCobalt(baseUrl: string, targetUrl: string): Promise<unknown> {
   const body = JSON.stringify({ url: targetUrl, vCodec: "h264" });
@@ -400,6 +402,238 @@ type CobaltResponse =
   | { status?: "error"; text?: string }
   | { status?: "stream" | "redirect"; url?: string }
   | { status?: "picker"; picker?: CobaltPickerItem[] };
+
+
+// -----------------------------
+// Direct downloaders (X/TikTok) + fallback to Cobalt
+// -----------------------------
+
+function isInstagramUrl(u: URL): boolean {
+  const h = u.hostname.toLowerCase();
+  return h === "instagram.com" || h.endsWith(".instagram.com");
+}
+
+function isTikTokUrl(u: URL): boolean {
+  const h = u.hostname.toLowerCase();
+  return h === "tiktok.com" || h.endsWith(".tiktok.com") || h === "vm.tiktok.com";
+}
+
+function isXUrl(u: URL): boolean {
+  const h = u.hostname.toLowerCase();
+  return (
+    h === "twitter.com" ||
+    h.endsWith(".twitter.com") ||
+    h === "x.com" ||
+    h.endsWith(".x.com") ||
+    h === "t.co" ||
+    h === "fxtwitter.com" ||
+    h === "vxtwitter.com" ||
+    h === "fixupx.com"
+  );
+}
+
+async function resolveRedirect(url: string): Promise<string> {
+  try {
+    const res = await fetch(url, { method: "GET", redirect: "follow" });
+    // Cloudflare fetch exposes final URL via res.url
+    return res.url || url;
+  } catch {
+    return url;
+  }
+}
+
+function extractTweetId(url: string): string | null {
+  const m = url.match(/\/status\/(\d+)/i);
+  return m?.[1] ?? null;
+}
+
+type TgMediaItem =
+  | { kind: "photo"; url: string }
+  | { kind: "video"; url: string; width?: number; height?: number; duration?: number }
+  | { kind: "animation"; url: string; width?: number; height?: number; duration?: number };
+
+async function tgSendSingleMedia(env: Env, chatId: number, item: TgMediaItem, caption: string, replyTo?: number) {
+  const common: Record<string, unknown> = { chat_id: chatId, caption };
+  if (replyTo) {
+    common.reply_to_message_id = replyTo;
+    common.allow_sending_without_reply = true;
+  }
+
+  if (item.kind === "photo") {
+    await tgCall(env, "sendPhoto", { ...common, photo: item.url });
+  } else if (item.kind === "animation") {
+    await tgCall(env, "sendAnimation", { ...common, animation: item.url, width: item.width, height: item.height, duration: item.duration });
+  } else {
+    await tgCall(env, "sendVideo", { ...common, video: item.url, width: item.width, height: item.height, duration: item.duration });
+  }
+}
+
+async function tgSendMediaGroup(env: Env, chatId: number, items: TgMediaItem[], caption: string, replyTo?: number) {
+  // Telegram sendMediaGroup supports photo/video only.
+  const media = items.map((it, idx) => {
+    const type = it.kind === "photo" ? "photo" : "video";
+    return {
+      type,
+      media: it.url,
+      caption: idx === 0 ? caption : undefined,
+    };
+  });
+
+  const body: Record<string, unknown> = { chat_id: chatId, media };
+  if (replyTo) {
+    body.reply_to_message_id = replyTo;
+    body.allow_sending_without_reply = true;
+  }
+  await tgCall(env, "sendMediaGroup", body);
+}
+
+async function tryDirectX(env: Env, chatId: number, inputUrl: string, replyTo?: number): Promise<boolean> {
+  try {
+    const resolved = await resolveRedirect(inputUrl);
+    const id = extractTweetId(resolved);
+    if (!id) return false;
+
+    const apiRes = await fetch(`https://api.fxtwitter.com/status/${id}`, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        Accept: "application/json",
+        Referer: "https://fxtwitter.com/",
+      },
+    });
+    if (!apiRes.ok) return false;
+
+    const data = (await apiRes.json()) as any;
+    const tweet = data?.tweet;
+    if (!tweet) return false;
+
+    const caption: string = tweet.text || "";
+    const mediaItems: TgMediaItem[] = [];
+
+    if (tweet.media?.videos?.length > 0) {
+      for (const video of tweet.media.videos) {
+        let mediaUrl: string | undefined = video.url;
+        if (Array.isArray(video.variants) && video.variants.length > 0) {
+          const mp4 = video.variants.filter((v: any) => v.content_type === "video/mp4");
+          const best = mp4.sort((a: any, b: any) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+          if (best?.url) mediaUrl = best.url;
+        }
+        if (!mediaUrl) continue;
+
+        const isGif = video.type === "gif" || String(mediaUrl).includes("tweet_video");
+        mediaItems.push({
+          kind: isGif ? "animation" : "video",
+          url: mediaUrl,
+          width: video.width,
+          height: video.height,
+          duration: video.duration,
+        });
+      }
+    }
+
+    if (tweet.media?.photos?.length > 0) {
+      for (const photo of tweet.media.photos) {
+        if (photo?.url) mediaItems.push({ kind: "photo", url: photo.url });
+      }
+    }
+
+    if (mediaItems.length === 0) {
+      await tgSend(env, chatId, caption || "بدون مدیا!", replyTo);
+      return true;
+    }
+
+    if (mediaItems.length === 1) {
+      await tgSendSingleMedia(env, chatId, mediaItems[0], caption, replyTo);
+      return true;
+    }
+
+    // For media groups, Telegram doesn't support "animation" items → send as video in group
+    const groupItems = mediaItems.map((i) => (i.kind === "photo" ? i : { ...i, kind: "video" as const }));
+    await tgSendMediaGroup(env, chatId, groupItems, caption, replyTo);
+    return true;
+  } catch (e) {
+    console.error("Direct X failed:", e);
+    return false;
+  }
+}
+
+async function tryDirectTikTok(env: Env, chatId: number, inputUrl: string, replyTo?: number): Promise<boolean> {
+  try {
+    const resolved = await resolveRedirect(inputUrl);
+
+    const apiRes = await fetch(`https://www.tikwm.com/api/?hd=1&url=${encodeURIComponent(resolved)}`);
+    if (!apiRes.ok) return false;
+
+    const data = (await apiRes.json()) as any;
+    if (data?.code !== 0) return false;
+
+    const tt = data.data;
+    const caption: string = tt?.title || tt?.desc || "";
+    const mediaItems: TgMediaItem[] = [];
+
+    if (Array.isArray(tt?.images) && tt.images.length > 0) {
+      for (const img of tt.images) {
+        if (img) mediaItems.push({ kind: "photo", url: String(img) });
+      }
+    } else if (tt?.hdplay || tt?.play) {
+      mediaItems.push({
+        kind: "video",
+        url: String(tt.hdplay || tt.play),
+        width: tt.width,
+        height: tt.height,
+        duration: tt.duration,
+      });
+    }
+
+    if (mediaItems.length === 0) {
+      await tgSend(env, chatId, caption || "بدون مدیا!", replyTo);
+      return true;
+    }
+
+    if (mediaItems.length === 1) {
+      await tgSendSingleMedia(env, chatId, mediaItems[0], caption, replyTo);
+      return true;
+    }
+
+    await tgSendMediaGroup(env, chatId, mediaItems, caption, replyTo);
+    return true;
+  } catch (e) {
+    console.error("Direct TikTok failed:", e);
+    return false;
+  }
+}
+
+async function handleMediaDownload(env: Env, chatId: number, url: string, replyTo?: number) {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return;
+  }
+
+  // Instagram: untouched (still Cobalt)
+  if (isInstagramUrl(u)) {
+    await handleCobaltPublicDownload(env, chatId, url, replyTo);
+    return;
+  }
+
+  // X + TikTok: try new direct method first; only if it fails => fallback to Cobalt instances
+  if (isXUrl(u)) {
+    const ok = await tryDirectX(env, chatId, url, replyTo);
+    if (!ok) await handleCobaltPublicDownload(env, chatId, url, replyTo);
+    return;
+  }
+
+  if (isTikTokUrl(u)) {
+    const ok = await tryDirectTikTok(env, chatId, url, replyTo);
+    if (!ok) await handleCobaltPublicDownload(env, chatId, url, replyTo);
+    return;
+  }
+
+  // default fallback (shouldn't happen if pickMediaUrls filters correctly)
+  await handleCobaltPublicDownload(env, chatId, url, replyTo);
+}
+
 
 async function processCobaltResponse(env: Env, chatId: number, data: unknown, replyTo?: number) {
   const d = data as CobaltResponse;
@@ -751,9 +985,7 @@ function parsePersianNumber(tokens: string[]): number | null {
 }
 
 function parseDigitsWithScale(text: string): number | null {
-  const t = normalizeDigits(text)
-    .replace(/[٬,]/g, "") // remove thousand separators
-    .replace(/٫/g, "."); // Arabic decimal separator
+  const t = normalizeDigits(text);
   const m = t.match(/(\d+(?:\.\d+)?)(?:\s*(هزار|میلیون|ملیون|میلیارد|بیلیون|تریلیون|k|m|b))?/i);
   if (!m) return null;
   const num = Number(m[1]);
@@ -816,7 +1048,7 @@ function findCode(textNorm: string, rates: Record<string, Rate>, alias?: AliasIn
 
 
 function extractAmountOrNull(textNorm: string): number | null {
-  const cleaned = stripPunctForNumber(textNorm).replace(/\s+/g, " ").trim();
+  const cleaned = stripPunct(textNorm).replace(/\s+/g, " ").trim();
   const digitScaled = parseDigitsWithScale(cleaned);
   if (digitScaled != null && digitScaled > 0) return digitScaled;
 
@@ -1486,9 +1718,11 @@ export default {
     const cmd = normalizeCommand(textNorm);
 
     const run = async () => {
-      const downloadUrl = pickCobaltUrl(text);
-      if (downloadUrl) {
-        await handleCobaltPublicDownload(env, chatId, downloadUrl, replyTo);
+      const mediaUrls = pickMediaUrls(text);
+      if (mediaUrls.length > 0) {
+        for (const u of mediaUrls) {
+          await handleMediaDownload(env, chatId, u, replyTo);
+        }
         return;
       }
 
