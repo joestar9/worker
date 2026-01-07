@@ -20,6 +20,7 @@ jobs:
             TG_TOKEN
             TG_SECRET
             ADMIN_KEY
+            CHANNEL_ID
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_SECRET: ${{ secrets.TG_SECRET }}
