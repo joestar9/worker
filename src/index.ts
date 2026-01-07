@@ -1048,7 +1048,15 @@ function findCode(textNorm: string, rates: Record<string, Rate>, alias?: AliasIn
 
 
 function extractAmountOrNull(textNorm: string): number | null {
-  const cleaned = stripPunct(textNorm).replace(/\s+/g, " ").trim();
+  // NOTE: keep decimal separators so inputs like "0.1 btc" / "0٫1 btc" work.
+  // We only strip punctuation that would interfere with tokenization, while preserving "." inside numbers.
+  const cleaned = normalizeDigits(textNorm)
+    .replace(/[٫]/g, ".")
+    .replace(/[٬،]/g, "") // thousands separators (Arabic/Persian)
+    .replace(/[!?؟؛:()[\]{}"'«»]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
   const digitScaled = parseDigitsWithScale(cleaned);
   if (digitScaled != null && digitScaled > 0) return digitScaled;
 
