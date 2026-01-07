@@ -2,8 +2,10 @@ export interface Env {
   BOT_KV: KVNamespace;
   TG_TOKEN: string;
   TG_SECRET: string;
-  ADMIN_KEY: string;
+  ADMIN_KEY: string;  // Optional: if set and bot is admin in the channel, it will auto-post updates when prices change.
+  CHANNEL_ID?: string;
 }
+
 
 /**
  * Telegram Bot + currency/crypto/gold prices + Instagram/Twitter/X downloader
@@ -803,6 +805,7 @@ function buildStoredFromRaw(rawText: string): Stored {
 
 
 async function refreshRates(
+  env: Env,
   ctx?: ExecutionContext
 ): Promise<{ ok: true; changed: boolean; count: number; fetchedAtMs: number } | { ok: false; error: string }> {
   const prevFetchedAtMs = RUNTIME_RATES_CACHE?.stored?.fetchedAtMs ?? 0;
@@ -830,6 +833,8 @@ async function refreshRates(
     const changed = stored.fetchedAtMs !== prevFetchedAtMs;
     const count = Object.keys(stored.rates).length;
 
+    if (changed) await maybeBroadcastToChannel(env, stored, ctx);
+
     return { ok: true, changed, count, fetchedAtMs: stored.fetchedAtMs };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -846,7 +851,7 @@ async function getStoredOrRefresh(env: Env, ctx: ExecutionContext): Promise<Stor
   // In-isolate memory cache: reduces JSON.parse and cache reads.
   const cached = RUNTIME_RATES_CACHE;
   if (cached && now - cached.loadedAtMs <= RATES_CACHE_TTL_MS) {
-    if (now - cached.stored.fetchedAtMs > STALE_REFRESH_MS) ctx.waitUntil(refreshRates(ctx).catch(() => {}));
+    if (now - cached.stored.fetchedAtMs > STALE_REFRESH_MS) ctx.waitUntil(refreshRates(env, ctx).catch(() => {}));
     return cached.stored;
   }
 
@@ -857,14 +862,14 @@ async function getStoredOrRefresh(env: Env, ctx: ExecutionContext): Promise<Stor
     const stored = buildStoredFromRaw(rawText);
     const validationError = validateStored(stored);
     if (!validationError) {
-      if (now - stored.fetchedAtMs > STALE_REFRESH_MS) ctx.waitUntil(refreshRates(ctx).catch(() => {}));
+      if (now - stored.fetchedAtMs > STALE_REFRESH_MS) ctx.waitUntil(refreshRates(env, ctx).catch(() => {}));
       RUNTIME_RATES_CACHE = { stored, alias: buildAliasIndexCache(stored), loadedAtMs: now };
       return stored;
     }
   }
 
   // Cold start: fetch + populate cache
-  const res = await refreshRates(ctx);
+  const res = await refreshRates(env, ctx);
   if (res.ok) {
     const c = RUNTIME_RATES_CACHE;
     if (c) return c.stored;
@@ -986,11 +991,16 @@ function parsePersianNumber(tokens: string[]): number | null {
 
 function parseDigitsWithScale(text: string): number | null {
   const t = normalizeDigits(text);
-  const m = t.match(/(\d+(?:\.\d+)?)(?:\s*(هزار|میلیون|ملیون|میلیارد|بیلیون|تریلیون|k|m|b))?/i);
+
+  // IMPORTANT: latin scales (k/m/b) must be standalone tokens.
+  // Without a word boundary, inputs like "0.4 btc" would match "b" as "billion".
+  const m = t.match(/(\d+(?:\.\d+)?)(?:\s*(هزار|میلیون|ملیون|میلیارد|بیلیون|تریلیون)\b|\s*([kmb])\b)?/i);
   if (!m) return null;
+
   const num = Number(m[1]);
   if (!Number.isFinite(num) || num <= 0) return null;
-  const suf = (m[2] || "").toLowerCase();
+
+  const suf = (m[2] || m[3] || "").toLowerCase();
   const mul =
     suf === "هزار" || suf === "k"
       ? 1e3
@@ -1001,6 +1011,7 @@ function parseDigitsWithScale(text: string): number | null {
           : suf === "تریلیون"
             ? 1e12
             : 1;
+
   return num * mul;
 }
 
@@ -1239,6 +1250,37 @@ async function tgSendPhoto(env: Env, chatId: number, photoUrl: string | undefine
 // -----------------------------
 // UI formatting and keyboards
 // -----------------------------
+
+async function sha256Hex(s: string): Promise<string> {
+  const data = new TextEncoder().encode(s);
+  const buf = await crypto.subtle.digest("SHA-256", data);
+  const bytes = Array.from(new Uint8Array(buf));
+  return bytes.map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function maybeBroadcastToChannel(env: Env, stored: Stored, ctx?: ExecutionContext) {
+  const channelIdRaw = env.CHANNEL_ID?.trim();
+  if (!channelIdRaw) return;
+
+  const out = buildAll(stored);
+  const hash = await sha256Hex(out);
+  const key = "broadcast:lastHash";
+  const last = await env.BOT_KV.get(key);
+  if (last === hash) return;
+
+  const chunks = chunkText(out, 3800);
+  const sendAll = async () => {
+    for (const c of chunks) await tgSend(env, channelIdRaw, c);
+  };
+
+  try {
+    if (ctx) ctx.waitUntil(sendAll());
+    else await sendAll();
+    await env.BOT_KV.put(key, hash);
+  } catch {
+    // If bot isn't admin / cannot post, ignore.
+  }
+}
 
 function chunkText(s: string, maxLen = 3500) {
   const out: string[] = [];
@@ -1611,7 +1653,7 @@ async function safeJson<T>(req: Request): Promise<T | null> {
 
 export default {
   async scheduled(_event: ScheduledEvent, _env: Env, ctx: ExecutionContext) {
-    await refreshRates(ctx).catch(() => {});
+    await refreshRates(_env, ctx).catch(() => {});
   },
 
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -1622,7 +1664,7 @@ export default {
       const key = url.searchParams.get("key") || "";
       if (!env.ADMIN_KEY || key !== env.ADMIN_KEY) return new Response("Unauthorized", { status: 401 });
       try {
-        const r = await refreshRates(ctx);
+        const r = await refreshRates(env, ctx);
         return new Response(JSON.stringify(r), { headers: { "content-type": "application/json" } });
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -1756,7 +1798,7 @@ export default {
           .filter(Boolean);
         const key = parts[1] || "";
         if (!env.ADMIN_KEY || key !== env.ADMIN_KEY) return;
-        const r = await refreshRates(ctx);
+        const r = await refreshRates(env, ctx);
         await tgSend(env, chatId, r.ok ? "✅ بروزرسانی شد" : "⛔️ خطا", replyTo);
         return;
       }
