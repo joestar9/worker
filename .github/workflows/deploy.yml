@@ -24,3 +24,4 @@ jobs:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_SECRET: ${{ secrets.TG_SECRET }}
           ADMIN_KEY: ${{ secrets.ADMIN_KEY }}
+          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
