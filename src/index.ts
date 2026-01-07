@@ -2,7 +2,7 @@ export interface Env {
   BOT_KV: KVNamespace;
   TG_TOKEN: string;
   TG_SECRET: string;
-  ADMIN_KEY: string;  // Optional: if set and bot is admin in the channel, it will auto-post updates when prices change.
+  ADMIN_KEY: string;
   CHANNEL_ID?: string;
 }
 
